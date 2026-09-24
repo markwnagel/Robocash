@@ -197,8 +197,8 @@ def test_html_report_is_self_contained_and_escaped():
     from desk.report_html import build_html
     html = build_html(_ctx())
     assert html.startswith("<!doctype html>") and html.rstrip().endswith("</html>")
-    # Email clients strip these: nothing may depend on them.
-    for banned in ("<script", "<link", "position:", "display:flex", "@media", "http://", "https://"):
+    # Email clients strip these: nothing may depend on them. Links are fine; loading anything remote is not.
+    for banned in ("<script", "<link", "<img", "src=", "url(", "position:", "display:flex", "@media"):
         assert banned not in html, banned
     # Untrusted text (headlines, analyst prose) must be escaped, not rendered.
     assert "<script>alert" not in html and "&lt;script&gt;" in html
@@ -267,3 +267,20 @@ def test_manual_actions_lead_the_email():
     text, html = build_report(ctx), build_html(ctx)
     assert text.index("NEEDS YOUR ACTION") < text.index("RESULTS TODAY") and "sell 3 share(s)" in text
     assert html.index("Needs your action") < html.index("Performance vs SPY")
+
+
+def test_news_headlines_link_to_their_articles_safely():
+    """Headlines and URLs come from an outside feed: only plain http(s) addresses become links, escaped."""
+    from desk.report import notable_news
+    from desk.report_html import build_html
+    facts = {"UMC": {"headlines": [{"headline": "UMC ships 3nm", "age_h": 4.0, "source": "benzinga",
+                                    "url": "https://www.benzinga.com/news/26/09/umc?a=1&b=2"}]}}
+    news = notable_news(facts, ["UMC"])
+    assert news[0]["url"] == "https://www.benzinga.com/news/26/09/umc?a=1&b=2"
+    html = build_html(_ctx(news=news))
+    assert '<a href="https://www.benzinga.com/news/26/09/umc?a=1&amp;b=2"' in html and ">UMC ships 3nm</a>" in html
+    for bad in ("javascript:alert(1)", "data:text/html,x", 'https://x.com/" onclick="alert(1)', "", None):
+        item = [{"symbol": "UMC", "headline": "Headline <b>", "age_h": 1.0, "source": "x", "flags": [], "url": bad}]
+        out = build_html(_ctx(news=item))
+        assert "Headline &lt;b&gt;" in out and "javascript:" not in out and "onclick" not in out
+        assert "<a href" not in out.split("Notable news")[1].split("Changes to")[0]

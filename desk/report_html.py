@@ -6,12 +6,14 @@ backgrounds on every cell. Same ctx dict as the plain-text build_report, so the 
 """
 from __future__ import annotations
 
+import re
 from html import escape
 
 from desk.report import snapshot_line, trim_text
 
 INK, MUTED, LINE, BG, PANEL = "#16181d", "#6b7280", "#e6e8eb", "#ffffff", "#f7f8fa"
 POS, NEG = "#0f7a3d", "#b3261e"
+LINK = "#1d4ed8"
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
 
@@ -57,6 +59,16 @@ def _note_row(text: str, cols: int = 4) -> str:
     return (f'<tr><td colspan="{cols}" style="padding:0 10px 9px 10px;border-bottom:1px solid {LINE};'
             f'background:{BG};font-family:{FONT};font-size:12px;line-height:1.5;color:{MUTED};">'
             f'{escape(text)}</td></tr>')
+
+
+def _link(text: str, url) -> str:
+    """Escaped text, linked only to a plain http(s) address. The URL comes from the news feed, so anything
+    else (javascript:, data:, a malformed value) is left as unlinked text rather than trusted."""
+    u = str(url or "").strip()
+    if not re.match(r"^https?://[^\s\"'<>]+$", u):
+        return escape(text)
+    return (f'<a href="{escape(u, quote=True)}" style="color:{LINK};text-decoration:underline;">'
+            f'{escape(text)}</a>')
 
 
 def _empty(text: str) -> str:
@@ -191,7 +203,7 @@ def build_html(ctx: dict) -> str:
                          f'padding:2px 6px;border-radius:3px;margin-left:6px;white-space:nowrap;">'
                          f'{escape(", ".join(n["flags"]))}</span>')
             rows += ("<tr>" + _cell(f'<b>{escape(n["symbol"])}</b>', width="64px")
-                     + _cell(f'{escape(n["headline"][:140])}{flags}')
+                     + _cell(f'{_link(n["headline"][:140], n.get("url"))}{flags}')
                      + _num(f'{n["age_h"]:.0f}h') + "</tr>")
         parts.append(_section("Notable news", _table(rows)))
     else:
