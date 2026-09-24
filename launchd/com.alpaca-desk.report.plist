@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.alpaca-desk.report</string>
+  <!-- Two steps in one job: the agent monitor first, so the email carries today's health summary, then the
+       report. ';' not '&&': a failed monitor must never cost the day's email. caffeinate -i on each because
+       launchd does not wake the Mac and this machine sleeps after a minute idle (pmset wakes it at 13:40). -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/usr/bin/caffeinate -i __PROJECT_DIR__/.venv/bin/python __PROJECT_DIR__/monitor.py; exec /usr/bin/caffeinate -i __PROJECT_DIR__/.venv/bin/python __PROJECT_DIR__/report_daily.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>__PROJECT_DIR__</string>
+  <!-- 14:00 local, weekdays. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>__PROJECT_DIR__/state/launchd-report.log</string>
+  <key>StandardErrorPath</key><string>__PROJECT_DIR__/state/launchd-report.log</string>
+</dict>
+</plist>

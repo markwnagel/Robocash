@@ -1,0 +1,16 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.claude/settings.local.json
+
+# Runtime state - account data, trades, briefs, emails, caches, telemetry, monitor state. Never committed.
+state/*
+# ...except the frozen backtest inputs, so a fresh clone reproduces the published backtest numbers.
+# (The frozen price panel under state/history/prices is 45MB and is re-downloaded instead.)
+!state/history/
+state/history/*
+!state/history/universe_bt*.json
+!state/history/earnings.csv

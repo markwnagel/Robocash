@@ -1,0 +1,202 @@
+# Backtest figures dated 2026-09-12 in the comments below were measured on a universe that no longer
+# exists and do not reproduce (that baseline, +247%, re-runs at +143.8% on the frozen snapshot). Treat
+# them as directional; see README "Reproducible backtests". Figures dated 2026-09-24 are reproducible.
+account:
+  paper: true
+  starting_capital: 10000
+
+data:
+  feed: sip            # free tier gets SIP historical after a 15-min delay; falls back to iex on 403
+  history_days: 300
+  cache_dir: state/cache
+  cache_retention_days: 2   # bar panels older than this are deleted after each fetch. Their filename
+                            # carries the fetch date and only today's is ever read, so nothing reachable
+                            # is lost; 0 disables pruning. Fact sheets and EDGAR data are never touched.
+
+universe:
+  exchanges: [NYSE, NASDAQ]
+  min_price: 5.0
+  min_avg_dollar_volume: 20000000   # 20-day average, USD. Backtested 2026-09-12 (3y): $5M / 1500 names
+  max_symbols: 800                  # = +53% / Sharpe 0.74 vs +247% / 1.78 here. Thin names win the momentum
+                                    # ranking and lose the trade (more gaps, smaller wins). Keep.
+  refresh_days: 7
+  exclude_name_keywords: [ETF, ETN, Fund, Trust, Warrant, Preferred, Acquisition, Rights, Units, Depositary Shares]
+
+signals:
+  momentum_lookback_days: 126
+  momentum_skip_days: 21
+  short_lookback_days: 20
+  trend_ma_days: 50
+  atr_days: 14
+  vol_days: 20
+  weights:
+    momentum: 0.6
+    short: 0.2
+    low_vol: 0.2
+  max_atr_pct: 0.08       # skip names whose 14-day ATR exceeds 8% of price
+
+portfolio:
+  sizing: risk_parity       # risk_parity: stop distance sets share count | notional: equity/target_positions
+  risk_per_trade_pct: 0.01  # risk_parity only: fraction of equity lost if the stop fills exactly
+                            # 1.25% tested 2026-09-24 (--stagger 6): beat 1% on return in 6/6 windows,
+                            # median +34.8 pts, drawdown 4/6. NOT adopted: avg position only 7.6 -> 7.8%,
+                            # part of the edge is kill-switch timing, and 12 x 1.25% = 15% open risk.
+  min_shares_per_position: 1  # >1 rejects names whose lot rounds too small to carry the intended risk.
+                              # 3 would cap buyable price at ~$333 on $10k (audit 2026-09-12); backtest first.
+  target_positions: 12      # 15 tested 2026-09-24 (--stagger 6): lost on return in 4/6 windows, median
+                            # -15.9 pts - the same cash spread across more, smaller positions. Keep 12.
+  max_positions: 15
+  max_position_pct: 0.10
+  cash_floor_pct: 0.05
+  max_new_entries_per_day: 4  # spreads entry timing. Backtested 2026-09-12 (3y): unlimited = +104%/DD -27.7%
+                              # with six hard-floor hits vs +247%/-20.5% at 4/day - batch entries share one
+                              # day's gap risk and trip the kill switch together. Keep.
+  pyramid_max_adds: 0         # >0: add up to this many units to a winner (Turtle-style). Backtested 2026-09-12:
+                              # 2 adds on a 2xATR trail = +115% vs +247% base; adds got shaken out on the same
+                              # pullbacks as the trail. OFF.
+  pyramid_trigger_r: 1.0      # add when price >= last entry + this many initial-risk units
+  correlation_days: 60
+  correlation_threshold: 0.75
+  max_correlated_peers: 1     # 0 was backtested 2026-09-12: worse return AND worse drawdown (momentum
+                              # leaders share a theme; blocking them reaches down to worse names)
+  vol_weighting: true       # notional sizing only
+
+exits:
+  stop_atr_multiple: 2.0
+  take_profit_r_multiple: 3.0    # 0 = no take-profit leg (pair with trail_atr_multiple > 0)
+  trail_atr_multiple: 0          # >0: each evening raise the stop to (highest close since entry - this x ATR),
+                                 # never lower, and replace the broker-side stop. Backtested 2026-09-12 (3y):
+                                 # 2x = +130%, 3x = +141% vs +247% with the 3R target - a trail exits on
+                                 # routine pullbacks at ~+9% where the target limit fills the spike at ~+14%.
+                                 # OFF. The target is not a cap on this strategy; it is the exit that works.
+  min_hold_days: 15
+  max_hold_days: 60
+  signal_decay_rank: 40      # after min_hold, exit if the name's rank falls beyond this
+  earnings_exit_days_before: 0   # >0: close a holding this many days before its confirmed earnings date,
+                                 # overriding min_hold_days. OFF (0) until the backtest earns it a value:
+                                 # it changes the risk profile, so it needs evidence first.
+
+risk:
+  max_drawdown_pct: 0.15     # from the episode high-water mark (reset by --resume); liquidate + halt
+  max_cumulative_drawdown_pct: 0.25  # from the ALL-TIME high; liquidate + halt until --resume --reset-hwm
+  daily_loss_halt_pct: 0.05  # no new entries on a day the account is down this much
+  max_daytrades_per_5d: 2
+
+regime:
+  enabled: true
+  spy_ma_days: 200
+  vix_risk_off: 30
+  risk_off_scale: 0.5        # multiplier on target_positions when SPY < MA or VIX high
+  ladder: false              # true: three states. strong = SPY >= MA x (1 + strong_spy_above_ma_pct) and
+                             # VIX < strong_vix_below -> concentrate; neutral = as configured above;
+                             # off = SPY < MA or VIX high -> risk_off_scale (or flat, see off_liquidate)
+  strong_spy_above_ma_pct: 0.03
+  strong_vix_below: 20
+  strong_target_positions: 8
+  strong_max_position_pct: 0.15
+  off_liquidate: false       # true: below the MA exit everything and hold cash (Faber rule). Backtested 2026-09-12
+                             # (3y bull market, 29 whipsaw exits): +181%/DD -16.3% vs +247%/-20.5%. The window has
+                             # no bear market, which is the only place this rule pays; the premium is measurable,
+                             # the payout is not. OFF; revisit if SPY spends a month below its MA. Ladder alone
+                             # (8 names/15% cap when strong): +192%/-19.2% - concentration is a wash. OFF.
+
+facts:
+  enabled: true
+  candidate_pool: 30                 # top-ranked candidates that get a fact sheet before selection
+  exclude_earnings_within_days: 5    # CALENDAR days, live and backtest alike. Hard block for candidates
+                                     # (needs FINNHUB_API_KEY; a failed lookup blocks too). Backtested
+                                     # 2026-09-12 over 3y: 0d +213%, 5d +247%/Sharpe 1.78, 21d +84%,
+                                     # 60d blocks the whole universe for two months of three. Trades that
+                                     # span a report are 75% of profit - the block only keeps a day-old
+                                     # stop from being gapped over. Elevated implied vol still halves size.
+  iv_over_rv_reduce_at: 1.5          # ATM implied vol / 20d realized vol above this -> half size
+  social_z_exclude_at: 3.0           # StockTwits message-rate z-score above this -> block (crowding/pump guard)
+  social_enabled: false              # OFF: the z-score needs ~15 sessions of its own history, and an inert
+                                     # guard that passes everything is worse than a visibly disabled one.
+                                     # Re-enable once state/social_history.json covers most of the pool.
+  insider_max_abs_usd: 50000000      # Form 4 rows above this single-fill size are affiliate blocks, not signal
+  insider_price_band: 3.0            # rows priced outside [spot/3, spot*3] are currency/ADR-ratio artifacts
+  insider_tilt_weight: 0.0           # promotion needs a backtest first; see README
+  insider_min_net_usd: 100000
+  classifier_model: claude-opus-5
+
+analyst:
+  enabled: true
+  model: claude-opus-5
+  max_web_searches: 20
+  candidates_to_review: 15     # >= max_positions: entries the analyst has not reviewed are dropped
+  reduce_factor: 0.75          # shares kept on an entry the analyst marks REDUCE (floored, min 1 share;
+                               # capped at 1.0 in code so it can never enlarge). Was 0.5 until 2026-09-24:
+                               # REDUCE hit 10 of the first 19 entries, leaving live at ~52% invested and
+                               # 7.8% open risk against a backtest that assumes full size. Not backtestable
+                               # (the analyst is not simulated) - it moves live toward the tested config.
+  red_team_enabled: true
+  red_team_max_web_searches: 10
+
+audit:
+  model: claude-opus-5
+  lookback_days: 45
+  post_exit_days: 20
+
+notify:
+  webhook_url_env: DESK_WEBHOOK_URL
+  webhook_payload_key: text
+
+report:
+  to: mark@markwnagel.com   # daily activity email, 14:00 local (after the 13:45 desk run)
+                            # Credentials live in .env only: SMTP_HOST/SMTP_USER/SMTP_PASSWORD
+                            # (+ optional SMTP_PORT, REPORT_FROM), or RESEND_API_KEY.
+                            # With neither set the report is still written to state/reports/.
+  summary_model: claude-sonnet-5   # rewrites each buy/sell into two plain sentences for the email.
+                                   # Display only - it has no trading authority and never sees a price
+                                   # the desk acts on. Blank it to use the structured templates instead.
+
+monitor:                       # agent reliability monitor (monitor.py): runs weekdays before the 14:00 report
+  enabled: true
+  model: claude-opus-5         # one call a day; first run: 15.6k in, 17.4k out (incl. reasoning), $0.51, 3.2 min
+  prompt_file: agent-monitor-prompt.md   # its Configuration block is filled from this section at run time
+  window_hours: 24             # first run only; afterwards the window is "since the previous monitor run"
+  baseline_days: 7
+  agents:                      # SLOs are set only where a real contract exists; the rest is baseline-only
+    - name: desk-job
+      purpose: Daily trading pipeline (run_daily.py) - sync with the broker, risk governor, rank, fact-check, AI review, place orders and protective stops, write the brief.
+      code_location: /Users/mark/TeamRobo/run_daily.py, desk/
+      owner: mark@markwnagel.com
+      expected_output: run_end status ok, skipped (market holiday) or halted for every scheduled weekday slot; the day's brief in state/briefs; no 'protection UNVERIFIED' notes.
+      slos: {task_success_rate: "every scheduled trading day (a missed day delays exits and the kill switch)", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: "n/a"}
+    - name: headline-classifier
+      purpose: Classify each candidate's recent headlines (tone; offering, guidance-cut, takeover, legal flags). Veto-side only.
+      code_location: desk/facts.py classify_headlines
+      owner: mark@markwnagel.com
+      expected_output: one result per requested symbol, schema-valid JSON.
+      slos: {task_success_rate: "none - baseline only", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 1}
+    - name: red-team
+      purpose: Strongest bear case per candidate and holding, with trap type and severity in [0, 1].
+      code_location: desk/analyst.py red_team
+      owner: mark@markwnagel.com
+      expected_output: one case per requested symbol; trap_type from the enum; severity within [0, 1].
+      slos: {task_success_rate: "none - baseline only", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 6}
+    - name: analyst
+      purpose: Veto-only review - KEEP, REMOVE or REDUCE per symbol with a reason; a brief for the owner.
+      code_location: desk/analyst.py review, apply_verdicts
+      owner: mark@markwnagel.com
+      expected_output: a verdict for every requested symbol and none for others; brief at most 150 words; never an ADD or a size increase.
+      slos: {task_success_rate: "none - baseline only", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 6}
+    - name: report-summarizer
+      purpose: One or two plain-English sentences per trade in the daily email.
+      code_location: desk/report.py plain_summaries
+      owner: mark@markwnagel.com
+      expected_output: a summary for every trade, at most 2 sentences / 45 words; template fallback only on failure.
+      slos: {task_success_rate: "none - baseline only", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 1}
+    - name: daily-report
+      purpose: The 14:00 weekday email (report_daily.py).
+      code_location: /Users/mark/TeamRobo/report_daily.py, desk/report.py, desk/report_html.py
+      owner: mark@markwnagel.com
+      expected_output: run_end status ok with email sent, every scheduled weekday.
+      slos: {task_success_rate: "every scheduled weekday", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: "n/a"}
+    - name: weekly-auditor
+      purpose: Saturday process audit (audit.py) - proposes at most 3 config changes, never edits config.
+      code_location: /Users/mark/TeamRobo/audit.py
+      owner: mark@markwnagel.com
+      expected_output: one run per week (runs when the Mac next wakes after Saturday); at most 3 proposed changes.
+      slos: {task_success_rate: "one run every 8 days or fewer", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 6}

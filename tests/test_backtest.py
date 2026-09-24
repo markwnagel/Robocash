@@ -1,0 +1,195 @@
+import pandas as pd
+
+from backtest import run_backtest, summarize
+
+
+def test_backtest_respects_constraints(cfg, panel):
+    pcfg = cfg["portfolio"]
+    dates = panel["close"].index
+    curve, trades = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, slippage_bps=10, halt_cooldown=5)
+    assert len(curve) > 50
+    assert curve["n_positions"].max() <= pcfg["max_positions"]
+    assert (curve["equity"] > 0).all()
+    if len(trades):
+        assert trades["hold_days"].max() <= cfg["exits"]["max_hold_days"] + 3
+        assert (trades["qty"] >= 1).all()
+        assert set(trades["reason"]) <= {"stop", "stop-gap", "target", "target-gap", "time", "decay", "kill-switch", "hard-floor", "regime"}
+    # Entry pacing: never more new positions in a day than the cap allows.
+    cap = cfg["portfolio"]["max_new_entries_per_day"]
+    assert curve["n_positions"].diff().max() <= cap
+    text = summarize(curve, trades, None)
+    assert "Max drawdown" in text
+
+
+def test_backtest_with_qualitative_features(cfg, panel):
+    dates = panel["close"].index
+    syms = list(panel["close"].columns)
+    # Earnings for every symbol every 40 days -> almost everything is blocked most of the time.
+    earnings = pd.DataFrame([(d.date().isoformat(), s) for s in syms for d in dates[::40]], columns=["date", "symbol"])
+    insider = pd.DataFrame([(dates[10].date().isoformat(), "S00", 250000.0)], columns=["date", "symbol", "net_usd"])
+    regime = pd.Series(0.5, index=dates)
+    tilted_cfg = dict(cfg, facts=dict(cfg["facts"], insider_tilt_weight=0.2))
+    curve, trades = run_backtest(panel, tilted_cfg, dates[0], dates[-1], 10000.0, 10, 5,
+                                 regime=regime, earnings=earnings, insider=insider)
+    assert curve["n_positions"].max() <= round(cfg["portfolio"]["target_positions"] * 0.5)
+    base_curve, base_trades = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    assert len(trades) < len(base_trades)  # the earnings blocks bite
+
+
+def test_no_leverage_ever(cfg, panel):
+    dates = panel["close"].index
+    curve, trades = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    assert (curve["cash"] >= -1e-6).all()
+    assert (curve["cash"] >= curve["equity"] * cfg["portfolio"]["cash_floor_pct"] * 0.5).mean() > 0.9
+
+
+def test_same_inputs_give_the_same_answer(cfg, panel):
+    """The whole point of the frozen universe and pinned end date. Guards against hidden nondeterminism
+    (set ordering, dict iteration) creeping into the loop itself."""
+    dates = panel["close"].index
+    c1, t1 = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    c2, t2 = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    pd.testing.assert_frame_equal(c1, c2)
+    pd.testing.assert_frame_equal(t1, t2)
+
+
+def test_overrides_never_touch_the_base_config(cfg):
+    from backtest import apply_overrides, build_parser
+    args = build_parser().parse_args(["--risk-per-trade", "0.0125", "--target-positions", "15", "--ladder"])
+    before = cfg["portfolio"]["risk_per_trade_pct"], cfg["portfolio"]["target_positions"], cfg["regime"]["ladder"]
+    out = apply_overrides(cfg, args)
+    assert out["portfolio"]["risk_per_trade_pct"] == 0.0125 and out["portfolio"]["target_positions"] == 15
+    assert out["regime"]["ladder"] is True
+    # --stagger runs this base next to the variant; a shared nested dict would make both the variant.
+    assert (cfg["portfolio"]["risk_per_trade_pct"], cfg["portfolio"]["target_positions"], cfg["regime"]["ladder"]) == before
+
+
+def test_frozen_universe_is_read_not_rebuilt(tmp_path, monkeypatch):
+    """The live universe.json rebuilds weekly and moved the baseline from +247% to +125%. A backtest must
+    read its own snapshot and never rebuild - or touch - the live file unless told to."""
+    import json
+    import backtest
+    (tmp_path / "state" / "history").mkdir(parents=True)
+    snap = tmp_path / "state" / "history" / "universe_bt.json"
+    snap.write_text(json.dumps({"date": "2026-09-21", "symbols": ["BBB", "AAA"]}))
+    cfg = {"_root": str(tmp_path)}
+
+    def must_not_build(*a, **k):
+        raise AssertionError("snapshot exists; nothing should be rebuilt")
+
+    monkeypatch.setattr(backtest, "build_universe", must_not_build)
+    syms, built, path = backtest.frozen_universe(None, None, cfg, "universe_bt.json")
+    assert syms == ["BBB", "AAA"] and built == "2026-09-21" and path == snap
+    assert not (tmp_path / "state" / "universe.json").exists()          # live file untouched
+
+    calls = []
+    monkeypatch.setattr(backtest, "build_universe",
+                        lambda t, d, c, force, cache_name: calls.append((force, cache_name)) or ["CCC"])
+    syms, _, _ = backtest.frozen_universe(None, None, cfg, "universe_bt.json", rebuild=True)
+    assert syms == ["CCC"] and calls == [(True, "history/universe_bt.json")]
+    assert backtest.universe_id(["AAA", "BBB"]) == backtest.universe_id(["BBB", "AAA"])   # order-independent
+
+
+def test_bars_stop_at_the_requested_end_date():
+    from datetime import datetime, timezone
+    from backtest import data_end
+    now = datetime(2026, 9, 24, 17, 0, tzinfo=timezone.utc)
+    # A past end date includes that day's bar and nothing after it, whenever the command is run.
+    assert data_end(pd.Timestamp("2026-09-11"), now) == datetime(2026, 9, 12, tzinfo=timezone.utc)
+    # An end of today is capped at the free-tier SIP delay.
+    assert data_end(pd.Timestamp("2026-09-24"), now) == datetime(2026, 9, 24, 16, 44, tzinfo=timezone.utc)
+
+
+def test_backtest_prices_are_frozen_not_redownloaded(tmp_path, monkeypatch):
+    """A re-download re-exposes the run to feed gaps (one blank TEVA moved the baseline 19 points), so the
+    price history is saved beside the universe snapshot and reused until --refetch-prices."""
+    import backtest
+    from desk.data import prune_bar_cache
+    fetched = []
+    monkeypatch.setattr(backtest, "fetch_daily_bars",
+                        lambda d, syms, days, feed, end=None: fetched.append(end) or {"close": pd.DataFrame({"A": [1.0]})})
+    cfg = {"_root": str(tmp_path), "data": {"feed": "sip"}}
+    end = pd.Timestamp("2026-09-11")
+    _, path = backtest.frozen_prices(None, ["A"], 30, cfg, end)
+    backtest.frozen_prices(None, ["A"], 30, cfg, end)                       # read back, not fetched
+    assert len(fetched) == 1 and path.parent == tmp_path / "state" / "history" / "prices"
+    assert fetched[0].date().isoformat() == "2026-09-12"                     # pinned to --end, not today
+    backtest.frozen_prices(None, ["A"], 30, cfg, end, refetch=True)
+    assert len(fetched) == 2
+    # Different window or universe -> its own file.
+    assert backtest.frozen_prices(None, ["A", "B"], 30, cfg, end)[1] != path
+    # The daily cache pruner never reaches it.
+    (tmp_path / "cache").mkdir()
+    prune_bar_cache(tmp_path / "cache", keep_days=2)
+    assert path.exists()
+
+
+def test_compare_windows_counts_wins_not_just_one_number():
+    from backtest import compare_windows
+
+    def s(total, dd, sh):
+        return {"total": total, "maxdd": dd, "sharpe": sh}
+
+    rows = [{"start": "2023-09-11", "base": s(1.25, -0.19, 1.20), "variant": s(2.01, -0.19, 1.54)},
+            {"start": "2023-10-11", "base": s(1.10, -0.18, 1.10), "variant": s(1.00, -0.22, 1.00)},
+            {"start": "2023-11-11", "base": s(0.90, -0.20, 1.00), "variant": s(1.00, -0.21, 1.05)}]
+    text = compare_windows(rows)
+    assert "return in 2/3 windows" in text and "drawdown in 1/3" in text and "Sharpe in 2/3" in text
+    assert "Median return difference +10.0 pts" in text and "range -10.0 to +76.0" in text
+
+
+class _Bars:
+    def __init__(self, df):
+        self.df = df
+
+
+class _FlakyFeed:
+    """Returns nothing for the named symbols on the first request, as the feed did for TEVA on 2026-09-24."""
+    def __init__(self, drop_first=(), drop_always=()):
+        self.calls, self.drop_first, self.drop_always = [], set(drop_first), set(drop_always)
+
+    def get_stock_bars(self, req):
+        syms = list(req.symbol_or_symbols)
+        self.calls.append(syms)
+        skip = self.drop_always | (self.drop_first if len(self.calls) == 1 else set())
+        rows = [{"symbol": s, "timestamp": d, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 10}
+                for s in syms if s not in skip for d in pd.date_range("2026-09-01", periods=3, tz="UTC")]
+        cols = ["symbol", "timestamp", "open", "high", "low", "close", "volume"]
+        return _Bars(pd.DataFrame(rows, columns=cols).set_index(["symbol", "timestamp"]))
+
+
+def test_a_symbol_the_feed_drops_is_fetched_again():
+    """Live, a held name with no bars is read as signal decay and sold; in a backtest it silently changes
+    the universe. One blank TEVA moved a three-year result by 19 points."""
+    from desk.data import fetch_daily_bars
+    feed = _FlakyFeed(drop_first={"TEVA"})
+    panel = fetch_daily_bars(feed, ["AAA", "TEVA"], 10)
+    assert feed.calls == [["AAA", "TEVA"], ["TEVA"]]                 # one retry, only for the missing name
+    assert panel["close"]["TEVA"].notna().all()
+
+
+def test_a_symbol_still_missing_after_the_retry_is_reported(caplog):
+    from desk.data import fetch_daily_bars
+    feed = _FlakyFeed(drop_always={"GONE"})
+    with caplog.at_level("WARNING", logger="desk.data"):
+        panel = fetch_daily_bars(feed, ["AAA", "GONE"], 10)
+    assert len(feed.calls) == 2 and "GONE" not in panel["close"].columns
+    assert any("STILL no bars" in r.message and "GONE" in r.message for r in caplog.records)
+    healthy = _FlakyFeed()
+    fetch_daily_bars(healthy, ["AAA", "BBB"], 10)
+    assert len(healthy.calls) == 1                                     # a complete response is not re-requested
+
+
+def test_a_day_with_missing_bars_neither_fakes_a_loss_nor_poisons_cash(cfg, panel):
+    """Held names used to vanish from equity on a gap day (a fake loss that can trip the kill switch) and
+    were then closed at a NaN price, turning cash - and every later equity point - into NaN."""
+    dates = panel["close"].index
+    gap = dates[-40]
+    holey = {f: v.copy() for f, v in panel.items()}
+    for f in holey:
+        holey[f].loc[gap] = float("nan")
+    curve, trades = run_backtest(holey, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    assert curve["equity"].notna().all() and curve["cash"].notna().all()
+    assert trades["exit_price"].notna().all() if len(trades) else True
+    day = curve["equity"].pct_change().loc[gap]
+    assert abs(day) < 0.05, f"gap day moved equity {day:+.1%} with no prices at all"
