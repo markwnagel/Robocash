@@ -129,7 +129,7 @@ def notable_news(facts: dict, symbols: list, max_age_h: float = 36.0, limit: int
                  if on]
         for h in (f.get("headlines") or [])[:1]:
             if h.get("age_h") is not None and h["age_h"] <= max_age_h:
-                out.append({"symbol": sym, "headline": h["headline"], "age_h": h["age_h"],
+                out.append({"symbol": sym, "headline": h["headline"], "age_h": h["age_h"], "url": h.get("url"),
                             "source": h.get("source", ""), "flags": flags})
     out.sort(key=lambda h: (not h["flags"], h["age_h"]))
     return out[:limit]
