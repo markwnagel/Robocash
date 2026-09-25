@@ -61,6 +61,15 @@ def _note_row(text: str, cols: int = 4) -> str:
             f'{escape(text)}</td></tr>')
 
 
+def _ticker(symbol: str, links: dict | None) -> str:
+    """A ticker, linked to its Google Finance page when its exchange is known."""
+    url = (links or {}).get(symbol)
+    if not url:
+        return f"<b>{escape(symbol)}</b>"
+    return (f'<a href="{escape(url, quote=True)}" style="color:{LINK};text-decoration:none;font-weight:700;">'
+            f'{escape(symbol)}</a>')
+
+
 def _link(text: str, url) -> str:
     """Escaped text, linked only to a plain http(s) address. The URL comes from the news feed, so anything
     else (javascript:, data:, a malformed value) is left as unlinked text rather than trusted."""
@@ -75,19 +84,21 @@ def _empty(text: str) -> str:
     return (f'<div style="font-family:{FONT};font-size:13px;color:{MUTED};padding:4px 0;">{escape(text)}</div>')
 
 
-def _head_row(cells: list, left: int = 1) -> str:
-    """`left` = how many leading columns are left-aligned, to match their cells."""
+def _head_row(cells: list, left: int = 1, html: dict | None = None) -> str:
+    """`left` = how many leading columns are left-aligned, to match their cells. `html` = {index: markup}
+    for a header that is a link rather than plain text."""
     out = ""
     for i, c in enumerate(cells):
         align = "left" if i < left else "right"
         out += (f'<th style="padding:0 10px 6px 10px;border-bottom:1px solid {LINE};font-family:{FONT};font-size:10px;'
                 f'letter-spacing:.06em;text-transform:uppercase;color:{MUTED};text-align:{align};font-weight:600;'
-                f'background:{BG};">{escape(c)}</th>')
+                f'background:{BG};">{(html or {}).get(i) or escape(c)}</th>')
     return f"<tr>{out}</tr>"
 
 
 def build_html(ctx: dict) -> str:
     eq, day_pct, day_pl = ctx["equity"], ctx["day_pct"], ctx["day_pl"]
+    links = ctx.get("quote_links") or {}
     parts = []
 
     # Headline: equity, today's move, cash.
@@ -123,7 +134,10 @@ def build_html(ctx: dict) -> str:
     # Performance against SPY - the headline comparison, so it sits first.
     perf = ctx.get("perf") or []
     if perf:
-        rows = _head_row(["Period", "Desk", "SPY", "Difference"])
+        spy = links.get("SPY")
+        rows = _head_row(["Period", "Desk", "SPY", "Difference"], html={2: (
+            f'<a href="{escape(spy, quote=True)}" style="color:{MUTED};text-decoration:underline;">SPY</a>'
+            if spy else None)})
         for r in perf:
             rows += ("<tr>" + _cell(f'<span style="white-space:nowrap;">{escape(r["period"])}</span>'
                                     f'<div style="color:{MUTED};font-size:11px;white-space:nowrap;padding-top:1px;">'
@@ -134,6 +148,36 @@ def build_html(ctx: dict) -> str:
     else:
         parts.append(_section("Performance vs SPY", _empty("not enough history yet")))
 
+    # Live against backtest: volatility and drawdown are what a backtest actually predicts (Wiecki et al. 2016).
+    ev = ctx.get("evidence")
+    if ev and ev.get("days"):
+        ref = ev.get("reference")
+        if ref:
+            def chip(status):
+                bad = status.startswith(("ABOVE", "BEYOND"))
+                warn = status.startswith(("below", "in the backtest's worst"))
+                bg, fg = ("#fdecea", NEG) if bad else ("#fff4e5", "#9a6700") if warn else (PANEL, MUTED)
+                return (f'<span style="background:{bg};color:{fg};font-size:10px;font-weight:600;padding:2px 6px;'
+                        f'border-radius:3px;white-space:nowrap;">{escape(status)}</span>')
+            rows = _head_row(["Measure", "Live", "Backtest", "Status"])
+            rows += ("<tr>" + _cell("20-day volatility")
+                     + _num(f"{ev['vol']:.1%}" if ev["vol"] is not None else "n/a")
+                     + _num(f"{ref['vol_p05']:.0%}-{ref['vol_p95']:.0%}") + _cell(chip(ev["vol_status"])) + "</tr>")
+            rows += ("<tr>" + _cell("Drawdown from peak") + _num(f"{ev['dd_now']:.1%}", ev["dd_now"] or None)
+                     + _num(f"worst {ref['max_dd']:.1%}") + _cell(chip(ev["dd_status"])) + "</tr>")
+            note = (f"Worst since trading began: {ev['dd_max']:.1%} over {ev['days']} trading days. Backtest: current "
+                    f"config, {ref['window']}, median 20-day volatility {ref['vol_p50']:.0%}.")
+            if ev.get("stale_reference"):
+                note += " The reference is from an older config; rerun the backtest without overrides to refresh it."
+        else:
+            rows, note = "", f"{ev['vol_status']}: run backtest.py once without overrides to create it."
+        inner = (_table(rows) if rows else "") + (
+            f'<div style="font-family:{FONT};font-size:12px;color:{MUTED};padding:8px 10px 0 10px;">{escape(note)}</div>')
+        if ctx.get("research"):
+            inner += (f'<div style="font-family:{FONT};font-size:12px;color:{INK};padding:6px 10px 0 10px;">'
+                      f'<b>Research:</b> {escape(ctx["research"])}</div>')
+        parts.append(_section("Live vs backtest", inner))
+
     # Results today: exits with P&L, then fills.
     closed, filled = ctx.get("closed_today") or [], [p for p in ctx["positions"] if p.get("filled_today")]
     plain = ctx.get("moves_plain") or {}
@@ -141,13 +185,13 @@ def build_html(ctx: dict) -> str:
         rows = _head_row(["", "Symbol", "Price", "Result"], left=2)
         for c in closed:
             rows += ("<tr>" + _cell(f'<span style="color:{NEG};font-weight:600;">SOLD</span>', width="62px")
-                     + _cell(f'<span style="white-space:nowrap;"><b>{escape(c["symbol"])}</b> &times;{c["qty"]:.0f}</span>')
+                     + _cell(f'<span style="white-space:nowrap;">{_ticker(c["symbol"], links)} &times;{c["qty"]:.0f}</span>')
                      + _num(f'{c["exit_price"]:,.2f}')
                      + _num(f'{c["pnl_pct"]:+.2%} ({c["pnl"]:+,.2f})', c["pnl_pct"], bold=True) + "</tr>"
                      + _note_row(plain.get(f'sold:{c["symbol"]}', "")))
         for p in filled:
             rows += ("<tr>" + _cell(f'<span style="color:{POS};font-weight:600;">BOUGHT</span>', width="62px")
-                     + _cell(f'<span style="white-space:nowrap;"><b>{escape(p["symbol"])}</b> &times;{p["qty"]:.0f}</span>')
+                     + _cell(f'<span style="white-space:nowrap;">{_ticker(p["symbol"], links)} &times;{p["qty"]:.0f}</span>')
                      + _num(f'{p["entry_price"]:,.2f}') + _num("—") + "</tr>"
                      + _note_row(plain.get(f'bought:{p["symbol"]}', "")))
         parts.append(_section("Results today", _table(rows)))
@@ -158,6 +202,29 @@ def build_html(ctx: dict) -> str:
                  f'<span style="color:{_colour(ctx.get("unrealized", 0))};font-weight:600;font-family:{MONO};">'
                  f'{ctx.get("unrealized", 0):+,.2f}</span></td></tr>')
 
+    # Every holding at the official close, largest first.
+    hold = ctx.get("holdings")
+    if hold and hold["rows"]:
+        rows = _head_row(["Symbol", "Close", "Value", "Day", "Since entry"])
+        for r in hold["rows"]:
+            sub = f'&times;{r["qty"]:.0f} &middot; {r["weight"]:.1%}' + (f' &middot; stop {r["stop"]:,.2f}' if r.get("stop") else "")
+            if r["live_mark"]:
+                sub += " &middot; live mark"
+            rows += ("<tr>" + _cell(f'<span style="white-space:nowrap;">{_ticker(r["symbol"], links)}</span>'
+                                    f'<div style="color:{MUTED};font-size:11px;white-space:nowrap;padding-top:2px;">{sub}</div>')
+                     + _num(f'{r["close"]:,.2f}') + _num(f'{r["value"]:,.2f}')
+                     + _num(_pct(r["day_pct"]), r["day_pct"])
+                     + _num(f'{_pct(r["pnl_pct"])} ({r["pnl"]:+,.2f})', r["pnl_pct"], bold=True) + "</tr>")
+        rows += ("<tr>" + _cell(f'<b>Total</b> <span style="color:{MUTED};font-size:11px;">{len(hold["rows"])} holdings</span>')
+                 + _num("") + _num(f'{hold["invested"]:,.2f}', bold=True) + _num("")
+                 + _num(f'{hold["pnl"]:+,.2f}', hold["pnl"], bold=True) + "</tr>")
+        inner = _table(rows) + (
+            f'<div style="font-family:{FONT};font-size:12px;color:{MUTED};padding:8px 10px 0 10px;">'
+            f'Invested ${hold["invested"]:,.2f} ({hold["invested"] / hold["equity"]:.0%}) + cash ${hold["cash"]:,.2f} '
+            f'= ${hold["equity"]:,.2f} at the close.</div>')
+        title = f'Current holdings · as of close {hold["asof"]}' if hold.get("asof") else "Current holdings"
+        parts.append(_section(title, inner))
+
     # Orders resting for the next open.
     staged = ctx.get("staged") or []
     if staged:
@@ -167,7 +234,7 @@ def build_html(ctx: dict) -> str:
             tag = (f'<span style="color:{POS if buy else NEG};font-weight:600;">{"BUY" if buy else "SELL"}</span>')
             note = trim_text(str(s.get("note", "")), max_chars=200)
             rows += ("<tr>" + _cell(tag, width="62px")
-                     + _cell(f'<span style="white-space:nowrap;"><b>{escape(s["symbol"])}</b> &times;{s["qty"]:.0f}</span>')
+                     + _cell(f'<span style="white-space:nowrap;">{_ticker(s["symbol"], links)} &times;{s["qty"]:.0f}</span>')
                      + _num(f'{s["limit"]:,.2f}' if s["limit"] else "market")
                      + _num(f'{s["stop"]:,.2f}' if s["stop"] else "—") + "</tr>"
                      + _note_row(note))
@@ -182,7 +249,7 @@ def build_html(ctx: dict) -> str:
         for p in mv["notable"]:
             stop = (f'<div style="color:{MUTED};font-size:11px;padding-top:2px;">stop {p["stop"]:,.2f}</div>'
                     if p.get("stop") else "")
-            rows += ("<tr>" + _cell(f'<b>{escape(p["symbol"])}</b>{stop}')
+            rows += ("<tr>" + _cell(f'{_ticker(p["symbol"], links)}{stop}')
                      + _num(_pct(p["day_pct"]), p["day_pct"], bold=True)
                      + _num(_pct(p["total_pct"]), p["total_pct"])
                      + _num(f'{p.get("price", 0):,.2f}') + "</tr>")
@@ -202,7 +269,7 @@ def build_html(ctx: dict) -> str:
                 flags = (f'<span style="background:#fdecea;color:{NEG};font-size:10px;font-weight:600;'
                          f'padding:2px 6px;border-radius:3px;margin-left:6px;white-space:nowrap;">'
                          f'{escape(", ".join(n["flags"]))}</span>')
-            rows += ("<tr>" + _cell(f'<b>{escape(n["symbol"])}</b>', width="64px")
+            rows += ("<tr>" + _cell(_ticker(n["symbol"], links), width="64px")
                      + _cell(f'{_link(n["headline"][:140], n.get("url"))}{flags}')
                      + _num(f'{n["age_h"]:.0f}h') + "</tr>")
         parts.append(_section("Notable news", _table(rows)))

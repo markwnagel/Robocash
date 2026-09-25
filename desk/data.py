@@ -42,11 +42,12 @@ def list_candidate_assets(trading: TradingClient, ucfg: dict) -> list:
 
 
 def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
-                     feed: str = "sip", end: datetime | None = None) -> dict:
-    """Returns {'open','high','low','close','volume'} -> DataFrame[date x symbol]."""
+                     feed: str = "sip", end: datetime | None = None, start: datetime | None = None) -> dict:
+    """Returns {'open','high','low','close','volume'} -> DataFrame[date x symbol]. `start`, when given,
+    replaces the window implied by `days`."""
     # Free-tier SIP requires the request window to end >= 15 minutes in the past.
     end = end or (datetime.now(timezone.utc) - timedelta(minutes=16))
-    start = end - timedelta(days=int(days * 1.45) + 10)
+    start = start or end - timedelta(days=int(days * 1.45) + 10)
     feed_state = {"feed": DataFeed(feed)}
 
     def pull(syms: list) -> list:
@@ -75,14 +76,16 @@ def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
         return set().union(*(set(f.loc[f["close"].notna(), "symbol"]) for f in frames)) if frames else set()
 
     frames = pull(symbols)
-    missing = [s for s in symbols if s not in with_data(frames)]
+    have = with_data(frames)          # once: rebuilding it per symbol scans every row N times
+    missing = [s for s in symbols if s not in have]
     if missing and frames:
         # The feed occasionally returns nothing for one name in an otherwise good response (TEVA,
         # 2026-09-24: every day blank). Nothing downstream can tell "no data" from "not ranked", so live
         # the desk would sell a holding as signal decay, and a backtest silently trades a different universe.
         log.warning("no bars for %d symbol(s), retrying once: %s", len(missing), ", ".join(missing[:10]))
         frames += pull(missing)
-        missing = [s for s in symbols if s not in with_data(frames)]
+        have = with_data(frames)
+        missing = [s for s in symbols if s not in have]
         if missing:
             log.warning("STILL no bars for %d symbol(s) - absent from this panel: %s",
                         len(missing), ", ".join(missing[:20]))
@@ -90,10 +93,9 @@ def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
         raise RuntimeError("no bar data returned")
     df = pd.concat(frames, ignore_index=True)
     df["date"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("America/New_York").dt.normalize().dt.tz_localize(None)
-    panel = {}
-    for f in FIELDS:
-        panel[f] = df.pivot_table(index="date", columns="symbol", values=f, aggfunc="last").sort_index()
-    return panel
+    # Last bar per (date, symbol), as pivot_table(aggfunc="last") did, at a fraction of the cost on long histories.
+    df = df.drop_duplicates(["date", "symbol"], keep="last")
+    return {f: df.pivot(index="date", columns="symbol", values=f).sort_index() for f in FIELDS}
 
 
 def cached_bars(data, symbols, days, cfg, tag="daily", asof=None) -> dict:

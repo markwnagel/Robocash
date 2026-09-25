@@ -13,7 +13,8 @@ def test_backtest_respects_constraints(cfg, panel):
     if len(trades):
         assert trades["hold_days"].max() <= cfg["exits"]["max_hold_days"] + 3
         assert (trades["qty"] >= 1).all()
-        assert set(trades["reason"]) <= {"stop", "stop-gap", "target", "target-gap", "time", "decay", "kill-switch", "hard-floor", "regime"}
+        assert set(trades["reason"]) <= {"stop", "stop-gap", "target", "target-gap", "time", "decay", "kill-switch",
+                                         "hard-floor", "regime", "delisted"}
     # Entry pacing: never more new positions in a day than the cap allows.
     cap = cfg["portfolio"]["max_new_entries_per_day"]
     assert curve["n_positions"].diff().max() <= cap
@@ -193,3 +194,81 @@ def test_a_day_with_missing_bars_neither_fakes_a_loss_nor_poisons_cash(cfg, pane
     assert trades["exit_price"].notna().all() if len(trades) else True
     day = curve["equity"].pct_change().loc[gap]
     assert abs(day) < 0.05, f"gap day moved equity {day:+.1%} with no prices at all"
+
+
+def _held_on(trades, dates, min_left=10):
+    """A (symbol, day) where the symbol is held with at least min_left sessions of the trade still to run."""
+    for t in trades.itertuples():
+        inside = dates[(dates > pd.Timestamp(t.entry_date)) & (dates < pd.Timestamp(t.exit_date))]
+        if len(inside) > min_left:
+            return t.symbol, inside[1]
+    raise AssertionError("no long enough holding in the synthetic run")
+
+
+def test_a_holding_whose_bars_stop_is_closed_at_its_last_price_after_a_week(cfg, panel):
+    """Delisted names (mergers, failures) used to keep their slot and their last price for the rest of the
+    run: the time exit sits behind the missing-bar check, so it never fired."""
+    from backtest import STALE_EXIT_DAYS
+    dates = panel["close"].index
+    _, base = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    sym, day = _held_on(base, dates)
+    gone = {f: v.copy() for f, v in panel.items()}
+    for f in gone:
+        gone[f].loc[gone[f].index >= day, sym] = float("nan")
+    _, trades = run_backtest(gone, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    out = trades[(trades.symbol == sym) & (trades.reason == "delisted")]
+    assert len(out) == 1
+    i = dates.get_loc(day)
+    assert pd.Timestamp(out.iloc[0].exit_date) == dates[i + STALE_EXIT_DAYS - 1]
+    last_close = panel["close"].loc[dates[i - 1], sym]
+    assert abs(out.iloc[0].exit_price - last_close * (1 - 10 / 10000)) < 1e-9
+
+
+def test_a_short_halt_is_not_a_delisting(cfg, panel):
+    from backtest import STALE_EXIT_DAYS
+    dates = panel["close"].index
+    _, base = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    sym, day = _held_on(base, dates)
+    i = dates.get_loc(day)
+    halted = {f: v.copy() for f, v in panel.items()}
+    for f in halted:
+        halted[f].loc[dates[i:i + STALE_EXIT_DAYS - 1], sym] = float("nan")
+    _, trades = run_backtest(halted, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    assert "delisted" not in set(trades["reason"])
+
+
+def test_membership_limits_what_can_be_bought(cfg, panel):
+    dates = panel["close"].index
+    c0, t0 = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    everyone = pd.DataFrame(True, index=dates, columns=panel["close"].columns)
+    c1, t1 = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, members=everyone)
+    pd.testing.assert_frame_equal(c0, c1)                      # all members = no membership at all
+    traded = sorted(set(t0["symbol"]))
+    banned = everyone.copy()
+    banned[traded[:3]] = False
+    _, t2 = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, members=banned)
+    assert not set(t2["symbol"]) & set(traded[:3])
+
+
+def test_random_entries_are_reproducible_and_differ_from_the_ranking(cfg, panel):
+    import numpy as np
+    dates = panel["close"].index
+    _, ranked = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    runs = [run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, entry_rng=np.random.default_rng(s))[1]
+            for s in (1, 1, 2)]
+    pd.testing.assert_frame_equal(runs[0], runs[1])
+    assert list(runs[0]["symbol"]) != list(ranked["symbol"]) or list(runs[2]["symbol"]) != list(ranked["symbol"])
+
+
+def test_simulated_vetoes_only_ever_shrink_or_drop_entries(cfg, panel):
+    import numpy as np
+    dates = panel["close"].index
+    _, base = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    none = {"remove": 1.0, "reduce": 0.0, "factor": 0.75, "half": 0.0, "rng": np.random.default_rng(0)}
+    _, dropped = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, veto=none)
+    assert dropped.empty
+    halve = {"remove": 0.0, "reduce": 0.0, "factor": 0.75, "half": 1.0, "rng": np.random.default_rng(0)}
+    _, halved = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, veto=halve)
+    first = base.iloc[0]
+    same = halved[(halved.symbol == first.symbol) & (halved.entry_date == first.entry_date)]
+    assert len(same) == 1 and same.iloc[0].qty == max(1, int(first.qty * 0.5))

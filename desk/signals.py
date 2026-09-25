@@ -26,16 +26,15 @@ def compute_panels(panel: dict, scfg: dict) -> dict:
     }
 
 
-def snapshot(panels: dict, i: int, scfg: dict) -> pd.DataFrame:
-    """Cross-sectional table at row i: score and rank (1 = best) among eligible names."""
-    snap = pd.DataFrame({
-        "close": panels["close"].iloc[i],
-        "momentum": panels["momentum"].iloc[i],
-        "short": panels["short"].iloc[i],
-        "vol": panels["vol"].iloc[i],
-        "atr": panels["atr"].iloc[i],
-        "ma": panels["ma"].iloc[i],
-    }).dropna()
+def snapshot(panels: dict, i: int, scfg: dict, cols=None) -> pd.DataFrame:
+    """Cross-sectional table at row i: score and rank (1 = best) among eligible names. cols limits the
+    cross-section to those symbols (a point-in-time universe plus holdings): ranks are percentiles, so
+    they depend on who else is in the table, as they do live."""
+    def row(k: str) -> pd.Series:
+        r = panels[k].iloc[i]
+        return r if cols is None else r.reindex(cols)
+
+    snap = pd.DataFrame({k: row(k) for k in ("close", "momentum", "short", "vol", "atr", "ma")}).dropna()
     snap["atr_pct"] = snap["atr"] / snap["close"]
     snap["eligible"] = (
         (snap["close"] > snap["ma"])

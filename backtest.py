@@ -36,16 +36,30 @@ from desk.portfolio import pyramid_due, select_entries, size_position, trail_sto
 from desk.regime import regime_params, regime_scale_series, regime_state_series, vix_series
 from desk.signals import compute_panels, rerank, snapshot
 from desk.state import STATE_DIR
+from desk import trials as T
+from desk.evidence import reference_from_curve
 
 log = logging.getLogger("desk.backtest")
+STALE_EXIT_DAYS = 5        # sessions without a bar before a holding is closed at its last price
 
 
 def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp, capital: float,
                  slippage_bps: float, halt_cooldown: int, regime: pd.Series | None = None,
                  earnings: pd.DataFrame | None = None, insider: pd.DataFrame | None = None,
-                 regime_state: pd.Series | None = None, panels: dict | None = None) -> tuple:
+                 regime_state: pd.Series | None = None, panels: dict | None = None,
+                 members: pd.DataFrame | None = None, entry_rng: np.random.Generator | None = None,
+                 veto: dict | None = None) -> tuple:
     """panels: precomputed compute_panels(panel, cfg['signals']) - pass it when running the same panel and
-    signal settings many times (--stagger), since it is the bulk of each run's cost."""
+    signal settings many times (--stagger), since it is the bulk of each run's cost.
+
+    Used by robustness.py:
+      members    date x symbol bool, the point-in-time universe. New entries and ranks come from that
+                 day's members plus holdings (live ranks universe + holdings); None = every panel column.
+      entry_rng  pick entries in random order among eligible names instead of by score - the null test.
+                 Exits still use the real ranks, so only the choice of what to buy changes.
+      veto       {"rng", "remove", "reduce", "factor", "half"}: independently per entry, dropped with
+                 probability remove (no refill, as live), cut to `factor` with probability reduce, and
+                 halved (the implied-vol rule) with probability half."""
     scfg, pcfg, ecfg, rcfg, fcfg = cfg["signals"], cfg["portfolio"], cfg["exits"], cfg["risk"], cfg["facts"]
     gcfg = cfg.get("regime", {})
     slip = slippage_bps / 10000
@@ -56,6 +70,9 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
     # into NaN for the rest of the run.
     cf = cl.ffill()
     atr_panel = panels["atr"]
+    mem = None
+    if members is not None:
+        mem = members.reindex(index=cl.index, columns=cl.columns, fill_value=False).to_numpy(dtype=bool)
     dates = cl.index
     warm = scfg["momentum_lookback_days"] + scfg["trend_ma_days"]
 
@@ -136,7 +153,14 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             p = positions[sym]
             o, h, l, c = op.at[d, sym], hi.at[d, sym], lo.at[d, sym], cl.at[d, sym]
             if np.isnan(c):
+                # No bar: a halt, or the name stopped trading (merger, bankruptcy). Waiting forever would
+                # hold the slot and the last price for the rest of the run, so after a week out it goes at
+                # the last close. For a failure that price flatters the result; robustness.py lists these.
+                p["missing"] = p.get("missing", 0) + 1
+                if p["missing"] >= STALE_EXIT_DAYS:
+                    close_pos(sym, cf.at[d, sym] * (1 - slip), d, "delisted")
                 continue
+            p["missing"] = 0
             if o <= p["stop"]:
                 close_pos(sym, o * (1 - slip), d, "stop-gap")
             elif l <= p["stop"]:
@@ -182,7 +206,10 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
         if equity / last_equity - 1 <= -rcfg["daily_loss_halt_pct"]:
             allow = False
 
-        snap = snapshot(panels, i, scfg)
+        cols = None
+        if mem is not None:
+            cols = cl.columns[mem[i]].union(pd.Index(list(positions)))
+        snap = snapshot(panels, i, scfg, cols)
         if pre_earn:
             # Window measured in bars so a Monday report is caught on the preceding Thursday/Friday;
             # calendar-day arithmetic would look at the weekend and miss it.
@@ -215,24 +242,40 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
 
         if allow and i + 1 < len(dates):
             slots = rp["target_positions"] - len(positions)
+            esnap = snap
+            if entry_rng is not None:
+                esnap = snap.copy()
+                el = esnap["eligible"].to_numpy(dtype=bool)
+                esnap.loc[el, "score"] = entry_rng.random(int(el.sum()))
+                esnap.loc[el, "rank"] = esnap.loc[el, "score"].rank(ascending=False, method="first")
+                esnap = esnap.sort_values("rank")
             if earn_by_sym or ins is not None:
                 blocked, tilt = {}, {}
-                for sym in snap.index[snap["eligible"].values][: fcfg["candidate_pool"] * 2]:
+                for sym in esnap.index[esnap["eligible"].values][: fcfg["candidate_pool"] * 2]:
                     if any(d < ed <= d + earn_window for ed in earn_by_sym.get(sym, [])):
                         blocked[sym] = "earnings"
                     if ins is not None and sym in ins.columns and ins.at[d, sym] >= fcfg["insider_min_net_usd"]:
                         tilt[sym] = float(fcfg["insider_tilt_weight"])
-                snap = rerank(snap, tilt, blocked)
+                esnap = rerank(esnap, tilt, blocked)
             rets = panels["returns"].iloc[max(0, i + 1 - pcfg["correlation_days"]): i + 1]
-            picks = select_entries(snap, rets, list(positions), slots, pcfg)
+            picks = select_entries(esnap, rets, list(positions), slots, pcfg)
             if max_new:
                 picks = picks[:max_new]
             cash_avail = cash - equity * pcfg["cash_floor_pct"]
             for sym in picks:
-                row = snap.loc[sym]
+                row = esnap.loc[sym]
                 sz = size_position(equity, cash_avail, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
                 if not sz:
                     continue
+                if veto:
+                    r = veto["rng"]
+                    if r.random() < veto["remove"]:
+                        continue
+                    cut = ((veto["factor"] if r.random() < veto["reduce"] else 1.0)
+                           * (0.5 if r.random() < veto["half"] else 1.0))
+                    if cut < 1.0:
+                        q = max(1, math.floor(sz["qty"] * cut))
+                        sz = {**sz, "qty": q, "notional": q * float(row["close"])}
                 cash_avail -= sz["notional"]
                 pending.append({"symbol": sym, "qty": sz["qty"], "limit": round(float(row["close"]) * 1.005, 2), "atr": float(row["atr"]),
                                 "intended_risk": equity * pcfg["risk_per_trade_pct"] if pcfg.get("sizing") == "risk_parity" else None})
@@ -409,6 +452,30 @@ def universe_id(symbols: list) -> str:
     return hashlib.sha1(",".join(sorted(symbols)).encode()).hexdigest()[:8]
 
 
+STRATEGY_SECTIONS = ("signals", "portfolio", "exits", "risk", "regime", "universe")
+BACKTEST_FACTS = ("exclude_earnings_within_days", "insider_tilt_weight", "insider_min_net_usd", "candidate_pool")
+
+
+def strategy_fingerprint(cfg: dict, slippage_bps: float, halt_cooldown: int) -> dict:
+    """Everything that changes a backtest's result, and nothing that does not (model names, email)."""
+    return {**{k: cfg[k] for k in STRATEGY_SECTIONS},
+            "facts": {k: cfg["facts"].get(k) for k in BACKTEST_FACTS},
+            "slippage_bps": slippage_bps, "halt_cooldown": halt_cooldown}
+
+
+def current_config_id(cfg: dict) -> str:
+    """The variant id config.yaml runs as today, at the CLI's default slippage and halt cooldown."""
+    d = build_parser().parse_args([])
+    return T.config_id(strategy_fingerprint(cfg, d.slippage_bps, d.halt_cooldown_days))
+
+
+def overrides_of(args) -> dict:
+    """The CLI settings that differ from the defaults - a readable label for the variant."""
+    skip = {"start", "end", "tag", "capital", "stagger", "universe", "rebuild_universe", "refetch_prices"}
+    defaults = vars(build_parser().parse_args([]))
+    return {k: v for k, v in vars(args).items() if k not in skip and v != defaults.get(k)}
+
+
 def data_end(end: pd.Timestamp, now: datetime | None = None) -> datetime:
     """Bars through the requested end date, not through today, so the window does not grow a new tail
     every time the command is re-run. Free-tier SIP data must end at least 15 minutes in the past."""
@@ -524,13 +591,27 @@ def main() -> None:
                             panels=signal_panels[k])
 
     STATE_DIR.mkdir(exist_ok=True)
+    trial_log = Path(cfg["_root"]) / "state" / UNIVERSE_DIR / "trials.jsonl"
+    prior = int((cfg.get("backtest") or {}).get("prior_untracked_trials", 0))
+    uid = universe_id(universe)
+
+    def trial(c: dict, s: pd.Timestamp, curve: pd.DataFrame, label: dict) -> dict:
+        st = curve_stats(curve)
+        return {"config_id": T.config_id(strategy_fingerprint(c, args.slippage_bps, args.halt_cooldown_days)),
+                "overrides": label, "tag": args.tag, "start": str(s.date()), "end": str(end.date()),
+                "universe_id": uid, "data_coverage": f"{len(universe) - len(absent)}/{len(universe)}",
+                "stats": T.return_stats(curve["equity"]), "total": st["total"], "maxdd": st["maxdd"],
+                "sharpe_annual": st["sharpe"]}
+
     if args.stagger:
         tag = f"{start.date()}_{end.date()}_x{args.stagger}{('_' + args.tag) if args.tag else ''}"
         rows = []
         for k in range(args.stagger):
             s = start + pd.DateOffset(months=k)
-            rows.append({"start": s.date(), "base": curve_stats(run(base_cfg, s)[0]),
-                         "variant": curve_stats(run(cfg, s)[0])})
+            cb, cv = run(base_cfg, s)[0], run(cfg, s)[0]
+            rows.append({"start": s.date(), "base": curve_stats(cb), "variant": curve_stats(cv)})
+            for c, curve, label in ((base_cfg, cb, {}), (cfg, cv, overrides_of(args))):
+                T.record(trial_log, trial(c, s, curve, label))
             log.info("window %d/%d (%s) done", k + 1, args.stagger, s.date())
         out = STATE_DIR / f"backtest_stagger_{tag}.csv"
         pd.DataFrame([{"start": r["start"], **{f"{w}_{m}": r[w][m] for w in ("base", "variant")
@@ -541,6 +622,16 @@ def main() -> None:
         return
 
     curve, trades = run(cfg, start)
+    this = trial(cfg, start, curve, overrides_of(args))
+    verdict = T.judge(T.load(trial_log), this, prior)
+    T.record(trial_log, {**this, "dsr": verdict["dsr"], "n_trials": verdict["n_trials"]})
+    if not overrides_of(args):
+        # The live-vs-backtest comparison in the daily email reads this; stamped with the config it describes
+        # so a later config change shows up as a stale reference rather than a silent mismatch.
+        ref = {**reference_from_curve(curve["equity"]), "config_id": this["config_id"], "universe_id": uid,
+               "window": f"{start.date()} to {end.date()}",
+               "generated": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        (Path(cfg["_root"]) / "state" / UNIVERSE_DIR / "live_reference.json").write_text(json.dumps(ref, indent=1))
     tag = f"{start.date()}_{end.date()}{('_' + args.tag) if args.tag else ''}"
     curve.to_csv(STATE_DIR / f"backtest_curve_{tag}.csv")
     trades.to_csv(STATE_DIR / f"backtest_trades_{tag}.csv", index=False)
@@ -548,7 +639,11 @@ def main() -> None:
     print(f"SIZING: {cfg['portfolio']['sizing']}"
           + (f" @ {cfg['portfolio']['risk_per_trade_pct']:.2%}/trade" if cfg["portfolio"]["sizing"] == "risk_parity" else ""))
     print(summarize(curve, trades, spy))
-    print(f"Saved state/backtest_curve_{tag}.csv and state/backtest_trades_{tag}.csv")
+    print(f"Deflated Sharpe {verdict['dsr']:.2f} - probability the edge is real after {verdict['n_trials']} trials "
+          f"({verdict['trials_with_spread']} comparable on this window) and this run's skew/kurtosis; 0.95 is the usual bar. "
+          f"Undeflated: {verdict['psr_vs_zero']:.2f}.")
+    print(f"Saved state/backtest_curve_{tag}.csv and state/backtest_trades_{tag}.csv; trial logged to "
+          f"state/{UNIVERSE_DIR}/trials.jsonl")
 
 
 if __name__ == "__main__":

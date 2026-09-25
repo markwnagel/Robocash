@@ -2,6 +2,7 @@
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
+import pytest
 
 from desk.report import (baselines, build_report, diff_fingerprint, fallback_summary, inception, movers,
                          notable_news, performance, plain_summaries)
@@ -284,3 +285,56 @@ def test_news_headlines_link_to_their_articles_safely():
         out = build_html(_ctx(news=item))
         assert "Headline &lt;b&gt;" in out and "javascript:" not in out and "onclick" not in out
         assert "<a href" not in out.split("Notable news")[1].split("Changes to")[0]
+
+
+def test_quote_links_only_for_verified_exchanges():
+    from desk.report import quote_url
+    assert quote_url("UMC", "NYSE") == "https://www.google.com/finance/quote/UMC:NYSE"
+    assert quote_url("AMD", "NASDAQ") == "https://www.google.com/finance/quote/AMD:NASDAQ"
+    assert quote_url("SPY", "ARCA") == "https://www.google.com/finance/quote/SPY:NYSEARCA"     # Alpaca's code
+    for exch in ("AMEX", "BATS", "OTC", "", None):          # unverified mapping: no link beats a wrong one
+        assert quote_url("XYZ", exch) is None
+    assert quote_url("BRK.B", "NYSE") is None and quote_url("A<b>", "NYSE") is None
+
+
+def test_holdings_are_marked_at_the_official_close():
+    from desk.report import holdings_at_close
+    idx = pd.to_datetime(["2026-09-23", "2026-09-24"])
+    closes = pd.DataFrame({"UMC": [24.00, 24.07], "TXG": [85.0, 86.0]}, index=idx)
+    positions = [  # 'price' is the live after-hours print; it must not be used when a close exists
+        {"symbol": "TXG", "qty": 6, "price": 99.0, "entry_price": 80.0, "stop": 66.75},
+        {"symbol": "UMC", "qty": 45, "price": 25.0, "entry_price": 21.85, "stop": 20.10},
+        {"symbol": "NEW", "qty": 2, "price": 50.0, "entry_price": 50.0, "stop": None},     # no bar yet
+    ]
+    h = holdings_at_close(positions, closes, cash=5000.0)
+    by = {r["symbol"]: r for r in h["rows"]}
+    assert by["UMC"]["close"] == 24.07 and by["UMC"]["value"] == pytest.approx(45 * 24.07)
+    assert by["UMC"]["day_pct"] == pytest.approx(24.07 / 24.00 - 1)
+    assert by["TXG"]["pnl"] == pytest.approx(6 * 6.0) and not by["TXG"]["live_mark"]
+    assert by["NEW"]["live_mark"] and by["NEW"]["close"] == 50.0 and by["NEW"]["day_pct"] is None
+    assert h["equity"] == pytest.approx(5000 + 45 * 24.07 + 6 * 86 + 100)
+    assert sum(r["weight"] for r in h["rows"]) == pytest.approx(h["invested"] / h["equity"])
+    assert [r["symbol"] for r in h["rows"]] == ["UMC", "TXG", "NEW"]           # largest first
+    assert str(h["asof"]) == "2026-09-24"
+
+
+def test_email_lists_holdings_and_links_every_ticker():
+    from desk.report import holdings_at_close
+    from desk.report_html import build_html
+    closes = pd.DataFrame({"UMC": [24.0, 24.07], "DELL": [580.0, 586.94]}, index=pd.to_datetime(["2026-09-16", "2026-09-17"]))
+    ctx = _ctx(news=[{"symbol": "UMC", "headline": "chip demand", "age_h": 5.0, "source": "x", "flags": []}])
+    ctx["holdings"] = holdings_at_close(ctx["positions"], closes, ctx["cash"])
+    ctx["quote_links"] = {s: f"https://www.google.com/finance/quote/{s}:{e}" for s, e in
+                          [("UMC", "NYSE"), ("DELL", "NYSE"), ("HUM", "NYSE"), ("AMD", "NASDAQ"), ("SPY", "NYSEARCA")]}
+    text, html = build_report(ctx), build_html(ctx)
+    assert "CURRENT HOLDINGS (as of close 2026-09-17)" in text and "UMC" in text.split("CURRENT HOLDINGS")[1]
+    assert "invested $" in text and "+ cash $" in text
+    assert "Current holdings · as of close 2026-09-17" in html and "&amp;middot;" not in html
+    def section(title):   # a section runs from its title to the next section title
+        return html.split(title, 1)[1].split("letter-spacing:.09em", 1)[0]
+    for sym, title in [("UMC", "Current holdings"), ("HUM", "Results today"), ("AMD", "Working for the next open"),
+                       ("UMC", "Notable news"), ("UMC", "Notable moves")]:
+        assert f'href="https://www.google.com/finance/quote/{sym}:' in section(title), (sym, title)
+    assert 'href="https://www.google.com/finance/quote/SPY:NYSEARCA"' in html.split("Performance vs SPY")[1][:3000]
+    # A ticker with no verified exchange stays plain bold text.
+    assert "<b>TXG</b>" in html
