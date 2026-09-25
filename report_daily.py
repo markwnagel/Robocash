@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import QueryOrderStatus
-from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
+from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, GetPortfolioHistoryRequest
 
 from desk.config import alpaca_keys, load_config, require_paper
 from desk.data import fetch_daily_bars
@@ -34,6 +35,45 @@ from desk.state import STATE_DIR, atomic_write_text, load_state
 
 log = logging.getLogger("desk.report")
 DEAD = {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day", "stopped", "suspended"}
+DESK_WAIT_MINUTES = 20      # the desk starts 13:45 and this job at 14:00; a slow desk run (p95 ~5 min) must not
+                            # leave the email reading a missing brief with nothing to say so (monitor F-15)
+
+
+def desk_status(today: date, briefs_dir: Path | None = None) -> str:
+    """'done' once today's brief is written and no desk run is still going; 'running' while one is;
+    'missing' when nothing has run today."""
+    brief = (briefs_dir or STATE_DIR / "briefs") / f"{today.isoformat()}.md"
+    since = datetime.combine(today, datetime.min.time()).astimezone()
+    ev = [e for e in telemetry.load_events(since, datetime.now().astimezone()) if e.get("job") == "desk"]
+    if {e["run_id"] for e in ev if e["event"] == "run_start"} - {e["run_id"] for e in ev if e["event"] == "run_end"}:
+        return "running"
+    return "done" if brief.exists() and date.fromtimestamp(brief.stat().st_mtime) == today else "missing"
+
+
+def wait_for_desk(today: date, trading_day: bool, minutes: float = DESK_WAIT_MINUTES, poll_s: float = 30,
+                  clock=time.monotonic, sleep=time.sleep, status=desk_status) -> str | None:
+    """Wait for today's desk run before building the email. Returns None when it is done (or there is no
+    run on a market holiday), else the warning the email must carry."""
+    if not trading_day:
+        return None
+    deadline = clock() + minutes * 60
+    while True:
+        s = status(today)
+        if s == "done":
+            return None
+        if clock() >= deadline:
+            what = "was still running" if s == "running" else "had not written today's brief"
+            return (f"today's desk run {what} at {datetime.now():%H:%M} after a {minutes:.0f}-minute wait: the notes "
+                    f"below may be missing or out of date - check state/launchd.log")
+        sleep(poll_s)
+
+
+def is_trading_day(trading, today: date) -> bool:
+    try:
+        return any(c.date == today for c in trading.get_calendar(GetCalendarRequest(start=today, end=today)))
+    except Exception as e:           # unknown: waiting on a holiday costs minutes, skipping a check costs the brief
+        log.warning("trading calendar unavailable: %s", e)
+        return True
 
 
 def equity_series(trading: TradingClient) -> pd.Series:
@@ -154,6 +194,8 @@ def main() -> None:
     key, secret = alpaca_keys()
     trading = TradingClient(key, secret, paper=require_paper(cfg))
     data = StockHistoricalDataClient(key, secret)
+    desk_warning = None if args.print_only else wait_for_desk(today, is_trading_day(trading, today))
+    telemetry.note(desk_ready=desk_warning is None)
     st = load_state()
 
     acct = trading.get_account()
@@ -237,7 +279,8 @@ def main() -> None:
         "changes": changes, "halted": st.get("halt_reason") if st.get("halted") else None,
         "notes": brief_notes(today), "health": health_today(today),
         "evidence": evidence_today(cfg, eq_series), "research": research[0],
-        "manual": [n.split(":", 1)[1].strip() for n in brief_notes(today) if n.startswith("MANUAL ACTION")],
+        "manual": ([desk_warning] if desk_warning else [])
+                  + [n.split(":", 1)[1].strip() for n in brief_notes(today) if n.startswith("MANUAL ACTION")],
     }
     text, html = build_report(ctx), build_html(ctx)
 

@@ -108,6 +108,12 @@ def parse_form4(xml_bytes: bytes) -> dict:
     # The 10b5-1 checkbox (Forms filed from April 2023): trades pre-scheduled under a plan say little about
     # what an insider thinks now, and a large holder's plan sales can swamp every other row.
     plan = (root.findtext("aff10b5One") or "").strip().lower() in ("1", "true")
+    # A 10% holder that is not an officer - usually a fund or sponsor selling down a stake, often a director
+    # only "by deputization" - is not insider sentiment: Silver Lake's exit from DELL read as -$879M of
+    # "insider selling" in 30 days against ~$60M by its executives. A founder-CEO stays an insider.
+    flags = lambda r, k: (r.findtext(k) or "").strip().lower() in ("1", "true")
+    rels = [r for r in root.iter("reportingOwnerRelationship")]
+    holder = any(flags(r, "isTenPercentOwner") for r in rels) and not any(flags(r, "isOfficer") for r in rels)
     buys = sells = 0.0
     n = 0
     txs = []
@@ -124,7 +130,7 @@ def parse_form4(xml_bytes: bytes) -> dict:
             sells += usd
         n += 1
         txs.append({"code": code, "usd": round(usd, 2), "price": price, "shares": shares,
-                    "date": tx.findtext("transactionDate/value"), "plan": plan})
+                    "date": tx.findtext("transactionDate/value"), "plan": plan, "holder": holder})
     return {"buys": buys, "sells": sells, "net_usd": buys - sells, "n": n, "transactions": txs}
 
 

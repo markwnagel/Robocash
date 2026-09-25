@@ -59,6 +59,7 @@ run_daily.py (16:45 ET, weekdays)
  10. ANALYST        Claude rules KEEP / REMOVE / REDUCE per name with facts + bear case in hand. Veto-only.
                     REDUCE keeps `analyst.reduce_factor` (0.75) of an entry's shares, floored, min 1 share;
                     capped at 1.0 in code so no config value can make a veto enlarge a position.
+                    A REDUCE on a stock already held is a concern, not a trade: noted once, see limitations.
                     If the API call fails: no new entries today, holdings untouched. An entry it gives no
                     KEEP / REMOVE / REDUCE verdict for is dropped: nothing is bought unreviewed.
  11. final gate     position count, per-position size, 5% cash floor, day-trade guard (code, not LLM)
@@ -470,10 +471,13 @@ monitor's own telemetry reports the real figure every day.
   (`--halt-cooldown-days`) and starts again; live waits for you to run `--resume`. It fired three times in
   three years on the baseline, so expect roughly one halt a year, and treat any result that depends on halt
   timing as optimistic.
-- **An analyst REDUCE on a name already held is reported, not acted on.** Trimming part of a position
-  would leave the broker-side stop covering more shares than remain, so the verdict lands in the brief
-  (`flagged REDUCE ... review manually`) and on the position as `analyst_flag`. Entries are still cut
-  before purchase as normal. Acting on it automatically needs a partial-exit path and a backtest first.
+- **An analyst REDUCE on a name already held is a note, not a trade or an action item.** The holding keeps
+  its stop, target and decay rule, as in the backtest. The concern goes into the brief once, the first run
+  it is raised (`analyst concern on X (held; no trade ...)`), and is kept on the position as `analyst_flag`;
+  a later KEEP clears it. Until 2026-09-25 it was a MANUAL ACTION every run, which put the same advisories
+  under "Needs your action" daily. Entries are still cut before purchase as normal. Trimming holdings
+  automatically would need a partial-exit path that resizes the broker-side stop, and a backtest first:
+  the robustness study found no evidence the analyst's vetoes add return.
 - **Filing and news screens only look back 90 days.** A dilution filing older than that stops blocking the
   name: DELL was blocked 2026-09-14 on an 8-K 3.02 dated 2026-06-17 and bought on 09-16 when it aged out.
   Intentional (a June raise should not veto a September entry forever), but the block is a window, not a memory.

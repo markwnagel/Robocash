@@ -88,16 +88,25 @@ def test_verdicts_can_only_reduce_risk():
     assert notes == []                                    # no REDUCE landed on a holding here
 
 
-def test_reduce_on_a_held_position_is_reported_not_swallowed():
-    # Trimming a holding would leave the broker-side stop covering more shares than we own, so the
-    # verdict is surfaced for the owner instead. Silently doing nothing is the bug being guarded.
+def test_reduce_on_a_held_position_is_noted_once_and_never_trades():
+    # Trimming a holding would leave the broker-side stop covering more shares than we own, and the tested
+    # strategy manages holdings by stop, target and decay. The concern is noted the first run it appears -
+    # repeating it every run put the same advisory under "needs your action" daily.
     holdings = {"HLD": {"qty": 10}}
-    kept, exits, notes = apply_verdicts(
-        [{"symbol": "HLD", "action": "REDUCE", "reason": "insider selling", "confidence": 0.5}],
-        holdings, [])
+    reduce = [{"symbol": "HLD", "action": "REDUCE", "reason": "insider selling", "confidence": 0.5}]
+    kept, exits, notes = apply_verdicts(reduce, holdings, [])
     assert kept == [] and exits == {}                     # never turns into a sale
     assert len(notes) == 1 and "HLD" in notes[0] and "insider selling" in notes[0]
+    assert not notes[0].startswith("MANUAL ACTION")       # advisory, not an action item
     assert holdings["HLD"]["analyst_flag"] == "analyst REDUCE: insider selling"
+    # The next run's REDUCE on the same holding is recorded silently, with the latest reason.
+    _, _, notes = apply_verdicts([{**reduce[0], "reason": "still selling"}], holdings, [])
+    assert notes == [] and holdings["HLD"]["analyst_flag"] == "analyst REDUCE: still selling"
+    # A KEEP clears it, so a later concern is news again.
+    apply_verdicts([{"symbol": "HLD", "action": "KEEP", "reason": "ok", "confidence": 0.5}], holdings, [])
+    assert "analyst_flag" not in holdings["HLD"]
+    _, _, notes = apply_verdicts(reduce, holdings, [])
+    assert len(notes) == 1
 
 
 def test_parse_tolerates_fenced_json():
@@ -143,8 +152,8 @@ def test_a_crowded_trap_without_crowding_data_carries_no_severity(monkeypatch):
     payload = {"holdings": [{"symbol": "AMD", "facts": {"social_msgs_per_day": None, "social_z": None}}],
                "candidates": [{"symbol": "GME", "facts": {"social_msgs_per_day": 900.0, "social_z": 4.1}}]}
     monkeypatch.setattr(analyst, "_call_json", lambda *a, **k: {"cases": [
-        {"symbol": "AMD", "bear_case": "Everyone owns it.", "trap_type": "crowded", "severity": 0.6},
-        {"symbol": "GME", "bear_case": "Retail pile-in.", "trap_type": "crowded", "severity": 0.8}]})
+        {"symbol": "AMD", "bear_case": "Everyone owns it.", "trap_type": "crowded", "severity": 0.6, "evidence": "social_z"},
+        {"symbol": "GME", "bear_case": "Retail pile-in.", "trap_type": "crowded", "severity": 0.8, "evidence": "social_z: 4.1"}]})
     cases = analyst.red_team(payload, {"analyst": {"model": "m", "red_team_max_web_searches": 0}})
     assert cases["AMD"]["severity"] == 0.0 and "unverifiable" in cases["AMD"]["bear_case"]
     assert cases["GME"]["severity"] == 0.8                          # real crowding data: untouched
@@ -152,4 +161,33 @@ def test_a_crowded_trap_without_crowding_data_carries_no_severity(monkeypatch):
 
 def test_the_analyst_is_told_it_never_executes_trades():
     from desk.analyst import ANALYST_SYSTEM
-    assert "Never write that a trade happened" in ANALYST_SYSTEM and "manual action" in ANALYST_SYSTEM
+    assert "Never write that a trade happened" in ANALYST_SYSTEM and "concern on X (no trade)" in ANALYST_SYSTEM
+    assert "manual action" not in ANALYST_SYSTEM          # a held REDUCE is not a request for the owner to trade
+
+
+def test_an_uncited_bear_case_cannot_carry_a_veto_level_severity(monkeypatch):
+    # ASST was scored "dilution 0.7" on 2026-09-24 with no offering or shelf filing in its fact sheet.
+    from desk import analyst
+    payload = {"holdings": [], "candidates": [{"symbol": "ASST", "facts": {"shelf_filings": []}},
+                                              {"symbol": "TWST", "facts": {"shelf_filings": ["S-3ASR 2026-08-12"]}}]}
+    monkeypatch.setattr(analyst, "_call_json", lambda *a, **k: {"cases": [
+        {"symbol": "ASST", "bear_case": "Treasury model implies issuance.", "trap_type": "dilution", "severity": 0.7,
+         "evidence": "none"},
+        {"symbol": "TWST", "bear_case": "Live shelf.", "trap_type": "dilution", "severity": 0.7,
+         "evidence": "shelf_filings: S-3ASR 2026-08-12"}]})
+    cases = analyst.red_team(payload, {"analyst": {"model": "m", "red_team_max_web_searches": 0}})
+    assert cases["ASST"]["severity"] == analyst.UNCITED_SEVERITY_CAP and "no cited evidence" in cases["ASST"]["bear_case"]
+    assert cases["TWST"]["severity"] == 0.7                          # cited: untouched
+
+
+def test_the_ai_roles_are_told_the_desk_s_own_earnings_rule(cfg):
+    # The analyst was told to veto "an earnings report inside the hold window", which is a 60-day block - the
+    # setting the backtest rejected (MXL vetoed at 26 days out, 2026-09-25). Code blocks within the configured
+    # days; the prompts must say later reports are allowed, and the payload must carry the number.
+    from desk.analyst import ANALYST_SYSTEM, RED_TEAM_SYSTEM, analyst_rules
+    r = analyst_rules(cfg)
+    assert r["earnings_block_days"] == cfg["facts"]["exclude_earnings_within_days"]
+    assert str(r["earnings_block_days"]) in r["earnings_policy"]
+    assert "inside the hold window that the" not in ANALYST_SYSTEM
+    assert "rules.earnings_block_days" in ANALYST_SYSTEM and "rules.earnings_block_days" in RED_TEAM_SYSTEM
+    assert r["social_screen"].startswith("off") == (not cfg["facts"].get("social_enabled", True))
