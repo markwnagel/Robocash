@@ -43,7 +43,7 @@ from alpaca.trading.enums import AssetClass, AssetStatus  # noqa: E402
 from alpaca.trading.requests import GetAssetsRequest  # noqa: E402
 
 from desk import pit  # noqa: E402
-from desk.config import alpaca_keys, load_config  # noqa: E402
+from desk.config import alpaca_keys, load_config, require_paper  # noqa: E402
 from desk.data import fetch_daily_bars  # noqa: E402
 
 log = logging.getLogger("build_pit")
@@ -150,7 +150,7 @@ def main() -> None:
     folder = root / "pit"
     folder.mkdir(parents=True, exist_ok=True)
     key, secret = alpaca_keys()
-    trading = TradingClient(key, secret, paper=cfg["account"]["paper"])
+    trading = TradingClient(key, secret, paper=require_paper(cfg))
     data = StockHistoricalDataClient(key, secret)
     d0, first_week, end = pd.Timestamp(args.data_start), pd.Timestamp(args.first_week), pd.Timestamp(args.end)
 

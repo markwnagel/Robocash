@@ -2,7 +2,7 @@
 """Robustness study: config.yaml as it runs today, on 8.7 years of point-in-time data, stress-tested.
 
   python scripts/build_pit_universe.py      # once: the point-in-time universe and its prices (resumable)
-  python robustness.py                      # every section, ~10 minutes on a multi-core Mac
+  python robustness.py                      # every section, ~2 minutes on 20 workers
   python robustness.py --sections core,costs --workers 8
 
 backtest.py answers "what did this config do on today's 800 names over three years?". This answers what
@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import time
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -43,7 +44,7 @@ import backtest as B
 from desk import pit
 from desk import trials as T
 from desk.config import load_config
-from desk.signals import compute_panels, snapshot
+from desk.signals import compute_panels, panel_key, snapshot
 
 log = logging.getLogger("desk.robustness")
 
@@ -92,6 +93,7 @@ STRESS = [
 ]
 
 _G: dict = {}
+PANEL_SETS = 2     # computed signal panels a worker keeps: config.yaml's plus the variant it is running
 
 
 def _set(cfg: dict, path: tuple, value) -> None:
@@ -105,7 +107,7 @@ def _init(inputs: str, panel_path: str) -> None:
     """Worker start: the panel and inputs are read once per process, not shipped with every job."""
     _G.update(pd.read_pickle(inputs))
     _G["panel"] = pd.read_pickle(panel_path)
-    _G["signal_panels"] = {}
+    _G["signal_panels"] = OrderedDict()
     logging.getLogger().setLevel(logging.WARNING)
 
 
@@ -115,14 +117,20 @@ def run_job(job: dict) -> dict:
     for path, value in job.get("overrides", []):
         _set(cfg, path, value)
     reg, reg_state = B.regime_inputs(_G["spy"], _G["vix"], cfg)
-    key = json.dumps(cfg["signals"], sort_keys=True)
-    if key not in _G["signal_panels"]:
-        _G["signal_panels"][key] = compute_panels(_G["panel"], cfg["signals"])
+    # Keyed on what compute_panels reads, and bounded: a worker used to keep one full panel set for every
+    # signal variant it had run, including weight and ATR-filter variants that need no new panels at all.
+    key, cache = panel_key(cfg["signals"]), _G["signal_panels"]
+    if key in cache:
+        cache.move_to_end(key)
+    else:
+        cache[key] = compute_panels(_G["panel"], cfg["signals"])
+        while len(cache) > PANEL_SETS:
+            cache.popitem(last=False)
     rng = np.random.default_rng(job["seed"]) if job.get("seed") is not None else None
     curve, trades = B.run_backtest(
         _G["panel"], cfg, pd.Timestamp(job["start"]), pd.Timestamp(job["end"]), _G["capital"],
         job.get("slippage", 10), 20, regime=reg, earnings=_G["earnings"], regime_state=reg_state,
-        panels=_G["signal_panels"][key], members=_G["members"][job.get("universe", "pit")],
+        panels=cache[key], members=_G["members"][job.get("universe", "pit")],
         entry_rng=rng if job.get("mode") == "random" else None,
         veto={**FRICTIONS, "rng": rng} if job.get("mode") == "frictions" else None)
     return {"name": job["name"], "group": job["group"], "job": {k: v for k, v in job.items() if k != "overrides"},

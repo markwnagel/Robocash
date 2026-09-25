@@ -198,7 +198,7 @@ def build_html(ctx: dict) -> str:
     else:
         parts.append(_section("Results today", _empty("nothing bought or sold")))
     parts.append(f'<tr><td style="padding:6px 10px;background:{BG};font-family:{FONT};font-size:12px;color:{MUTED};">'
-                 f'Unrealised across {len(ctx["positions"])} holdings: '
+                 f'Unrealised across {len(ctx["positions"])} holdings at the close: '
                  f'<span style="color:{_colour(ctx.get("unrealized", 0))};font-weight:600;font-family:{MONO};">'
                  f'{ctx.get("unrealized", 0):+,.2f}</span></td></tr>')
 

@@ -16,6 +16,7 @@ counts as the stop.
 from __future__ import annotations
 
 import argparse
+import bisect
 import copy
 import hashlib
 import json
@@ -30,17 +31,33 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 
-from desk.config import alpaca_keys, load_config
+from desk.config import alpaca_keys, load_config, require_paper
 from desk.data import build_universe, fetch_daily_bars
-from desk.portfolio import pyramid_due, select_entries, size_position, trail_stop
+from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries, shrink_qty, size_position,
+                            trail_stop)
 from desk.regime import regime_params, regime_scale_series, regime_state_series, vix_series
-from desk.signals import compute_panels, rerank, snapshot
-from desk.state import STATE_DIR
+from desk.signals import compute_panels, panel_key, rerank, snapshot
+from desk.state import STATE_DIR, atomic_pickle, atomic_write_text
 from desk import trials as T
+from desk.trials import BACKTEST_FACTS, STRATEGY_SECTIONS, current_config_id, strategy_fingerprint  # noqa: F401
 from desk.evidence import reference_from_curve
 
 log = logging.getLogger("desk.backtest")
 STALE_EXIT_DAYS = 5        # sessions without a bar before a holding is closed at its last price
+
+
+def _report_between(dates: list, after, upto) -> bool:
+    """A report dated in (after, upto]; `dates` sorted. Replaces a scan of every date for every candidate
+    on every day, which was a tenth of a run."""
+    k = bisect.bisect_right(dates, after)
+    return k < len(dates) and dates[k] <= upto
+
+
+def _aligned(frame: pd.DataFrame, like: pd.DataFrame):
+    """frame's values on like's rows and columns, as an array (a view when they already match)."""
+    if not (frame.index.equals(like.index) and frame.columns.equals(like.columns)):
+        frame = frame.reindex(index=like.index, columns=like.columns)
+    return frame.to_numpy()
 
 
 def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp, capital: float,
@@ -70,6 +87,9 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
     # into NaN for the rest of the run.
     cf = cl.ffill()
     atr_panel = panels["atr"]
+    # Plain arrays for the per-position reads below; .at[date, symbol] lookups were a tenth of the run time.
+    col = {s: j for j, s in enumerate(cl.columns)}
+    OP, HI, LO, CL, CF, ATR = (_aligned(f, cl) for f in (op, hi, lo, cl, cf, atr_panel))
     mem = None
     if members is not None:
         mem = members.reindex(index=cl.index, columns=cl.columns, fill_value=False).to_numpy(dtype=bool)
@@ -81,6 +101,8 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
         for r in earnings.dropna(subset=["date"]).itertuples():
             if str(r.date).strip():
                 earn_by_sym.setdefault(str(r.symbol).upper(), []).append(pd.Timestamp(r.date))
+        for v in earn_by_sym.values():
+            v.sort()
     pre_earn = int(ecfg.get("earnings_exit_days_before") or 0)  # trading days, not calendar days
     ins = None
     if insider is not None and len(insider):
@@ -108,10 +130,14 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                        "hold_days": (d - p["entry_date"]).days, "reason": reason,
                        "intended_risk": p.get("intended_risk"), "realized_risk": p.get("realized_risk"),
                        "adds": p.get("adds", 0), "final_stop": p["stop"],
-                       "spanned_earnings": any(p["entry_date"] < ed <= d for ed in earn_by_sym.get(sym, []))})
+                       "spanned_earnings": _report_between(earn_by_sym.get(sym, []), p["entry_date"], d)})
+
+    def last(sym):
+        """Last known close (forward-filled) on today's row."""
+        return CF[i, col[sym]]
 
     def mark():
-        return cash + sum(q["qty"] * cf.at[d, s] for s, q in positions.items() if not np.isnan(cf.at[d, s]))
+        return cash + sum(q["qty"] * last(s) for s, q in positions.items() if not np.isnan(last(s)))
 
     for i in range(warm, len(dates)):
         d = dates[i]
@@ -121,7 +147,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             break
         for e in pending:
             sym = e["symbol"]
-            o, l = op.at[d, sym], lo.at[d, sym]
+            o, l = OP[i, col[sym]], LO[i, col[sym]]
             is_add = bool(e.get("add"))
             if np.isnan(o) or is_add != (sym in positions):
                 continue
@@ -151,14 +177,15 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
 
         for sym in list(positions):
             p = positions[sym]
-            o, h, l, c = op.at[d, sym], hi.at[d, sym], lo.at[d, sym], cl.at[d, sym]
+            j = col[sym]
+            o, h, l, c = OP[i, j], HI[i, j], LO[i, j], CL[i, j]
             if np.isnan(c):
                 # No bar: a halt, or the name stopped trading (merger, bankruptcy). Waiting forever would
                 # hold the slot and the last price for the rest of the run, so after a week out it goes at
                 # the last close. For a failure that price flatters the result; robustness.py lists these.
                 p["missing"] = p.get("missing", 0) + 1
                 if p["missing"] >= STALE_EXIT_DAYS:
-                    close_pos(sym, cf.at[d, sym] * (1 - slip), d, "delisted")
+                    close_pos(sym, last(sym) * (1 - slip), d, "delisted")
                 continue
             p["missing"] = 0
             if o <= p["stop"]:
@@ -174,7 +201,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
         if trail:
             # Ratcheted on the close, so like the live evening job it protects from the next session on.
             for sym, p in positions.items():
-                c, a = cl.at[d, sym], atr_panel.at[d, sym]
+                c, a = CL[i, col[sym]], ATR[i, col[sym]]
                 if np.isnan(c) or np.isnan(a):
                     continue
                 p["high_close"] = max(p["high_close"], c)
@@ -191,14 +218,14 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             # Hard floor: flat for three cooldowns, then the all-time high is re-baselined - the closest
             # stand-in for a human running --resume --reset-hwm after a long pause.
             for sym in list(positions):
-                close_pos(sym, cf.at[d, sym] * (1 - slip), d, "hard-floor")
+                close_pos(sym, last(sym) * (1 - slip), d, "hard-floor")
             equity = cash
             hwm = ath = equity
             halted_until = i + 3 * halt_cooldown
             allow = False
         elif drawdown >= rcfg["max_drawdown_pct"]:
             for sym in list(positions):
-                close_pos(sym, cf.at[d, sym] * (1 - slip), d, "kill-switch")
+                close_pos(sym, last(sym) * (1 - slip), d, "kill-switch")
             equity = cash
             hwm = equity
             halted_until = i + halt_cooldown
@@ -215,17 +242,13 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             # calendar-day arithmetic would look at the weekend and miss it.
             window_end = dates[min(i + pre_earn, len(dates) - 1)]
             for sym in list(positions):
-                if any(d < ed <= window_end for ed in earn_by_sym.get(sym, [])):
-                    close_pos(sym, cf.at[d, sym] * (1 - slip), d, "pre-earnings")
+                if _report_between(earn_by_sym.get(sym, []), d, window_end):
+                    close_pos(sym, last(sym) * (1 - slip), d, "pre-earnings")
             equity = mark()
         for sym in list(positions):
-            p = positions[sym]
-            if (d - p["entry_date"]).days < ecfg["min_hold_days"]:
-                continue
-            if sym not in snap.index:
-                continue    # no complete bar today: defer, as the live run does
-            if not bool(snap.loc[sym, "eligible"]) or snap.loc[sym, "rank"] > ecfg["signal_decay_rank"]:
-                close_pos(sym, cf.at[d, sym] * (1 - slip), d, "decay")
+            # "defer" (no complete bar today) keeps the holding, as the live run does
+            if decay_exit(snap, sym, (d - positions[sym]["entry_date"]).days, ecfg) == "decay":
+                close_pos(sym, last(sym) * (1 - slip), d, "decay")
                 equity = mark()
 
         if regime_state is not None:
@@ -236,7 +259,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                   "max_position_pct": pcfg["max_position_pct"], "liquidate": False}
         if rp["liquidate"] and positions:
             for sym in list(positions):
-                close_pos(sym, cf.at[d, sym] * (1 - slip), d, "regime")
+                close_pos(sym, last(sym) * (1 - slip), d, "regime")
             equity = cash
         day_pcfg = dict(pcfg, max_position_pct=rp["max_position_pct"])
 
@@ -251,8 +274,9 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                 esnap = esnap.sort_values("rank")
             if earn_by_sym or ins is not None:
                 blocked, tilt = {}, {}
+                block_end = d + earn_window
                 for sym in esnap.index[esnap["eligible"].values][: fcfg["candidate_pool"] * 2]:
-                    if any(d < ed <= d + earn_window for ed in earn_by_sym.get(sym, [])):
+                    if _report_between(earn_by_sym.get(sym, []), d, block_end):
                         blocked[sym] = "earnings"
                     if ins is not None and sym in ins.columns and ins.at[d, sym] >= fcfg["insider_min_net_usd"]:
                         tilt[sym] = float(fcfg["insider_tilt_weight"])
@@ -274,10 +298,10 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                     cut = ((veto["factor"] if r.random() < veto["reduce"] else 1.0)
                            * (0.5 if r.random() < veto["half"] else 1.0))
                     if cut < 1.0:
-                        q = max(1, math.floor(sz["qty"] * cut))
+                        q = shrink_qty(sz["qty"], cut)
                         sz = {**sz, "qty": q, "notional": q * float(row["close"])}
                 cash_avail -= sz["notional"]
-                pending.append({"symbol": sym, "qty": sz["qty"], "limit": round(float(row["close"]) * 1.005, 2), "atr": float(row["atr"]),
+                pending.append({"symbol": sym, "qty": sz["qty"], "limit": entry_limit(float(row["close"])), "atr": float(row["atr"]),
                                 "intended_risk": equity * pcfg["risk_per_trade_pct"] if pcfg.get("sizing") == "risk_parity" else None})
             if pyr_n:
                 # Adds are sized like a fresh unit at today's price and capped by the position limit;
@@ -297,7 +321,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                     if q < 1:
                         continue
                     cash_avail -= q * px
-                    pending.append({"symbol": sym, "qty": q, "limit": round(px * 1.005, 2), "atr": a, "add": True})
+                    pending.append({"symbol": sym, "qty": q, "limit": entry_limit(px), "atr": a, "add": True})
 
         curve.append((d, equity, len(positions), cash))
         last_equity = equity
@@ -357,8 +381,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--start", default=(date.today() - timedelta(days=730)).isoformat())
     ap.add_argument("--end", default=date.today().isoformat())
     ap.add_argument("--capital", type=float, default=None)
-    ap.add_argument("--slippage-bps", type=float, default=10)
-    ap.add_argument("--halt-cooldown-days", type=int, default=20, help="trading days to stay flat after the kill switch")
+    ap.add_argument("--slippage-bps", type=float, default=T.DEFAULT_SLIPPAGE_BPS)
+    ap.add_argument("--halt-cooldown-days", type=int, default=T.DEFAULT_HALT_COOLDOWN,
+                    help="trading days to stay flat after the kill switch")
     ap.add_argument("--universe", default=None,
                     help="universe snapshot under state/history/ (default universe_bt.json)")
     ap.add_argument("--rebuild-universe", action="store_true",
@@ -452,28 +477,18 @@ def universe_id(symbols: list) -> str:
     return hashlib.sha1(",".join(sorted(symbols)).encode()).hexdigest()[:8]
 
 
-STRATEGY_SECTIONS = ("signals", "portfolio", "exits", "risk", "regime", "universe")
-BACKTEST_FACTS = ("exclude_earnings_within_days", "insider_tilt_weight", "insider_min_net_usd", "candidate_pool")
-
-
-def strategy_fingerprint(cfg: dict, slippage_bps: float, halt_cooldown: int) -> dict:
-    """Everything that changes a backtest's result, and nothing that does not (model names, email)."""
-    return {**{k: cfg[k] for k in STRATEGY_SECTIONS},
-            "facts": {k: cfg["facts"].get(k) for k in BACKTEST_FACTS},
-            "slippage_bps": slippage_bps, "halt_cooldown": halt_cooldown}
-
-
-def current_config_id(cfg: dict) -> str:
-    """The variant id config.yaml runs as today, at the CLI's default slippage and halt cooldown."""
-    d = build_parser().parse_args([])
-    return T.config_id(strategy_fingerprint(cfg, d.slippage_bps, d.halt_cooldown_days))
-
-
 def overrides_of(args) -> dict:
     """The CLI settings that differ from the defaults - a readable label for the variant."""
     skip = {"start", "end", "tag", "capital", "stagger", "universe", "rebuild_universe", "refetch_prices"}
     defaults = vars(build_parser().parse_args([]))
     return {k: v for k, v in vars(args).items() if k not in skip and v != defaults.get(k)}
+
+
+def writes_live_reference(args, uname: str) -> bool:
+    """Only config.yaml as it runs, on the default snapshot and capital. --universe and --capital are not
+    overrides (they leave config_id alone), so a run on another universe used to replace the email's
+    reference without its staleness check noticing."""
+    return not overrides_of(args) and uname == "universe_bt.json" and not args.capital
 
 
 def data_end(end: pd.Timestamp, now: datetime | None = None) -> datetime:
@@ -494,7 +509,7 @@ def frozen_prices(data, symbols: list, days: int, cfg: dict, end: pd.Timestamp, 
     if path.exists() and not refetch:
         return pd.read_pickle(path), path
     panel = fetch_daily_bars(data, symbols, days, cfg["data"]["feed"], end=data_end(end))
-    pd.to_pickle(panel, path)
+    atomic_pickle(panel, path)
     return panel, path
 
 
@@ -534,7 +549,7 @@ def main() -> None:
     if args.stagger and custom_universe:
         ap.error("--stagger compares against config.yaml on one universe; drop --min-dollar-volume/--max-symbols")
     key, secret = alpaca_keys()
-    trading = TradingClient(key, secret, paper=cfg["account"]["paper"])
+    trading = TradingClient(key, secret, paper=require_paper(cfg))
     data = StockHistoricalDataClient(key, secret)
     start, end = pd.Timestamp(args.start), pd.Timestamp(args.end)
     capital = args.capital or cfg["account"]["starting_capital"]
@@ -579,11 +594,11 @@ def main() -> None:
              cfg["exits"].get("trail_atr_multiple"), cfg["exits"].get("take_profit_r_multiple"),
              cfg["portfolio"].get("pyramid_max_adds"))
 
-    signal_panels = {}     # keyed by the signal settings: base and variant usually share them
+    signal_panels = {}     # keyed by what compute_panels reads: base and variant usually share them
 
     def run(c: dict, s: pd.Timestamp) -> tuple:
         reg, reg_state = regime_inputs(spy, vix, c)
-        k = json.dumps(c["signals"], sort_keys=True)
+        k = panel_key(c["signals"])
         if k not in signal_panels:
             signal_panels[k] = compute_panels(panel, c["signals"])
         return run_backtest(panel, c, s, end, capital, args.slippage_bps, args.halt_cooldown_days,
@@ -625,13 +640,13 @@ def main() -> None:
     this = trial(cfg, start, curve, overrides_of(args))
     verdict = T.judge(T.load(trial_log), this, prior)
     T.record(trial_log, {**this, "dsr": verdict["dsr"], "n_trials": verdict["n_trials"]})
-    if not overrides_of(args):
+    if writes_live_reference(args, uname):
         # The live-vs-backtest comparison in the daily email reads this; stamped with the config it describes
         # so a later config change shows up as a stale reference rather than a silent mismatch.
         ref = {**reference_from_curve(curve["equity"]), "config_id": this["config_id"], "universe_id": uid,
                "window": f"{start.date()} to {end.date()}",
                "generated": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        (Path(cfg["_root"]) / "state" / UNIVERSE_DIR / "live_reference.json").write_text(json.dumps(ref, indent=1))
+        atomic_write_text(Path(cfg["_root"]) / "state" / UNIVERSE_DIR / "live_reference.json", json.dumps(ref, indent=1))
     tag = f"{start.date()}_{end.date()}{('_' + args.tag) if args.tag else ''}"
     curve.to_csv(STATE_DIR / f"backtest_curve_{tag}.csv")
     trades.to_csv(STATE_DIR / f"backtest_trades_{tag}.csv", index=False)

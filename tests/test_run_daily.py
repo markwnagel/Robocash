@@ -2,7 +2,7 @@
 import json
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 
 import pandas as pd
 import pytest
@@ -22,12 +22,23 @@ class FakeBroker:
         self.statuses = {}
         self.protected = []          # (symbol, qty, stop, target) re-placed as GTC
         self.existing_stops = {}     # symbol -> object with .stop_price, or absent = unprotected
+        self.working_closes = {}     # symbol -> a market sell still working at the broker
         self.query_fails = False
+        self.session_open = False    # the scheduled run is after the close
+        self.cancelled = []          # (symbol, side) leftover-order sweeps
 
     def live_exit_orders(self, symbol):
         if self.query_fails:
-            return {"stop": None, "target": None, "error": True}
-        return {"stop": self.existing_stops.get(symbol), "target": None, "error": False}
+            return {"stop": None, "target": None, "close": None, "error": True}
+        return {"stop": self.existing_stops.get(symbol), "target": None,
+                "close": self.working_closes.get(symbol), "error": False}
+
+    def market_open(self):
+        return self.session_open
+
+    def cancel_symbol_orders(self, symbol, side=None):
+        self.cancelled.append((symbol, side))
+        return 0
 
     def submit_exit_protection(self, symbol, qty, stop, target):
         self.protected.append((symbol, qty, stop, target))
@@ -90,6 +101,10 @@ def wired(monkeypatch, tmp_path, panel):
     sent = []
     monkeypatch.setattr(run_daily, "send", lambda text, cfg: sent.append(text))
     monkeypatch.setattr(run_daily, "Broker", lambda trading, dry_run=False: holder["broker"])
+    # The scheduled run: 16:45 ET on the fixture's last bar date, after the close. Without this the suite's
+    # outcome would depend on the time of day it runs (16:00-16:20 ET is protect-only).
+    holder["clock"] = datetime.combine(date.today(), dtime(16, 45), tzinfo=run_daily.ET)
+    monkeypatch.setattr(run_daily, "now_et", lambda: holder["clock"])
     return holder, sent
 
 

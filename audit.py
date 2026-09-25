@@ -20,7 +20,7 @@ from desk.config import ROOT, alpaca_keys, load_config
 from desk.data import cached_bars
 from desk.notify import send
 from desk import telemetry
-from desk.state import BRIEFS_DIR, STATE_DIR, TRADES_FILE, load_state
+from desk.state import BRIEFS_DIR, STATE_DIR, TRADES_FILE, atomic_write_text, load_state
 
 log = logging.getLogger("desk.audit")
 
@@ -160,6 +160,7 @@ def main() -> None:
                      role="auditor")
     if not out:
         send(f"AUDIT {today}: auditor unavailable. Stats: {json.dumps(stats)}", cfg)
+        telemetry.note(auditor="unavailable", trades=stats.get("n_trades", 0))
         return
     lines = [f"WEEKLY AUDIT {today.isoformat()}", out["summary"], f"Sample size: {out['sample_size_warning']}", ""]
     for f in out["findings"]:
@@ -173,8 +174,9 @@ def main() -> None:
     text = "\n".join(lines)
     out_dir = STATE_DIR / "audits"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"{today.isoformat()}.md").write_text(text)
+    atomic_write_text(out_dir / f"{today.isoformat()}.md", text)
     send(text, cfg)
+    telemetry.note(auditor="ok", trades=stats.get("n_trades", 0), proposed_changes=len(out["proposed_changes"]))
 
 
 if __name__ == "__main__":

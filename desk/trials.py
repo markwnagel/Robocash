@@ -69,6 +69,28 @@ def config_id(overrides: dict) -> str:
     return hashlib.sha1(json.dumps(overrides, sort_keys=True, default=str).encode()).hexdigest()[:10]
 
 
+# What identifies a variant. Lives here, not in backtest.py, so the daily report can tell whether the live
+# reference describes the running config without importing the backtest CLI.
+STRATEGY_SECTIONS = ("signals", "portfolio", "exits", "risk", "regime", "universe")
+BACKTEST_FACTS = ("exclude_earnings_within_days", "insider_tilt_weight", "insider_min_net_usd", "candidate_pool")
+# backtest.py's CLI defaults. Integers on purpose: every logged config_id hashed them as 10 and 20, and a
+# float here would give today's config a new id and a new trial.
+DEFAULT_SLIPPAGE_BPS = 10
+DEFAULT_HALT_COOLDOWN = 20
+
+
+def strategy_fingerprint(cfg: dict, slippage_bps: float, halt_cooldown: int) -> dict:
+    """Everything that changes a backtest's result, and nothing that does not (model names, email)."""
+    return {**{k: cfg[k] for k in STRATEGY_SECTIONS},
+            "facts": {k: cfg["facts"].get(k) for k in BACKTEST_FACTS},
+            "slippage_bps": slippage_bps, "halt_cooldown": halt_cooldown}
+
+
+def current_config_id(cfg: dict) -> str:
+    """The variant id config.yaml runs as today, at the backtest's default slippage and halt cooldown."""
+    return config_id(strategy_fingerprint(cfg, DEFAULT_SLIPPAGE_BPS, DEFAULT_HALT_COOLDOWN))
+
+
 def record(path: Path, rec: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:

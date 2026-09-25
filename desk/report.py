@@ -17,7 +17,8 @@ import pandas as pd
 
 log = logging.getLogger("desk.report")
 
-TRACKED_CODE = ["run_daily.py", "backtest.py", "audit.py", "report_daily.py"]
+# Everything that decides a trade or writes what the owner reads, plus the monitor's instructions.
+TRACKED_CODE = ["run_daily.py", "backtest.py", "audit.py", "report_daily.py", "monitor.py", "agent-monitor-prompt.md"]
 
 
 def _asof(s: pd.Series, when) -> float | None:
@@ -396,7 +397,7 @@ def build_report(ctx: dict) -> str:
     for p in filled:
         L.append(f"  bought {p['symbol']:<5} {p['qty']:>4.0f} @ {p['entry_price']:.2f}")
         L += _wrap(plain.get(f"bought:{p['symbol']}", ""))
-    L.append(f"  holding {len(ctx['positions'])} names, {ctx.get('unrealized', 0):+,.2f} unrealized")
+    L.append(f"  holding {len(ctx['positions'])} names, {ctx.get('unrealized', 0):+,.2f} unrealized at the close")
     L.append("")
 
     h = ctx.get("holdings")
