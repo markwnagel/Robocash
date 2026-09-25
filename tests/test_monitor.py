@@ -437,3 +437,32 @@ def test_a_failed_sev1_email_is_retried_next_run(mon, monkeypatch):
     assert st["pending_escalations"] == [] and len(st["escalated"]) == 1
     _run_monitor(job, ["--no-llm"])
     assert len(attempts) == 2                                          # delivered once, never again
+
+
+def test_runs_record_who_started_them_and_help_is_not_a_run(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_daily.py", "--dry-run"])
+    monkeypatch.setenv("XPC_SERVICE_NAME", "application.com.apple.Terminal.123")
+    T.run_job("desk", lambda: T.note(dry_run=True))
+    monkeypatch.setenv("XPC_SERVICE_NAME", "com.alpaca-desk.daily")          # what launchd sets for the job
+    monkeypatch.setattr(sys, "argv", ["run_daily.py"])
+    T.run_job("desk", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["run_daily.py", "--help"])
+    T.run_job("desk", lambda: None)                                          # records nothing
+    starts = [e for e in _events() if e["event"] == "run_start"]
+    assert [(s["trigger"], s["args"]) for s in starts] == [("manual", "--dry-run"), ("launchd", "")]
+
+
+def test_only_scheduled_real_runs_set_a_job_s_latency():
+    now = datetime(2026, 9, 25, 21, 0, tzinfo=timezone.utc)
+
+    def run(rid, trigger, dur, **end):
+        ts = (now - timedelta(minutes=30)).isoformat()
+        return [{"event": "run_start", "run_id": rid, "job": "desk", "ts": ts, "trigger": trigger},
+                {"event": "run_end", "run_id": rid, "job": "desk", "ts": ts, "status": "ok", "duration_s": dur, **end}]
+    ev = run("a", "launchd", 290.0) + run("b", "manual", 1.2, dry_run=True) + run("c", "launchd", 1.0, dry_run=True) \
+        + run("d", "manual", 300.0)
+    j = M.job_signals(ev, now)["desk"]
+    assert j["kinds"] == {"scheduled": 1, "manual_or_test": 3}
+    assert j["duration_s_scheduled"]["n"] == 1 and j["duration_s_scheduled"]["median"] == 290.0
+    # Older events carry no trigger: judged by their dry_run/print_only notes alone, as before.
+    assert T.is_production({"job": "desk"}, {"status": "ok"}) and not T.is_production({}, {"print_only": True})

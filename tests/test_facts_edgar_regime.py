@@ -254,3 +254,76 @@ def test_form4_parser_reads_the_10b5_1_checkbox():
            b"</transactionAmounts></nonDerivativeTransaction></nonDerivativeTable></ownershipDocument>")
     assert parse_form4(xml)["transactions"][0]["plan"] is True
     assert parse_form4(xml.replace(b"<aff10b5One>1</aff10b5One>", b""))["transactions"][0]["plan"] is False
+
+
+def _form4(owners: list, rows: list) -> bytes:
+    own = "".join(
+        f"<reportingOwner><reportingOwnerId><rptOwnerName>{n}</rptOwnerName></reportingOwnerId>"
+        f"<reportingOwnerRelationship><isDirector>{int(d)}</isDirector><isOfficer>{int(o)}</isOfficer>"
+        f"<isTenPercentOwner>{int(t)}</isTenPercentOwner></reportingOwnerRelationship></reportingOwner>"
+        for n, d, o, t in owners)
+    tx = "".join(
+        f"<nonDerivativeTransaction><transactionDate><value>2026-09-10</value></transactionDate>"
+        f"<transactionCoding><transactionCode>S</transactionCode></transactionCoding><transactionAmounts>"
+        f"<transactionShares><value>{q}</value></transactionShares><transactionPricePerShare><value>{p}</value>"
+        f"</transactionPricePerShare></transactionAmounts></nonDerivativeTransaction>" for q, p in rows)
+    return f"<ownershipDocument><aff10b5One>0</aff10b5One>{own}<nonDerivativeTable>{tx}</nonDerivativeTable></ownershipDocument>".encode()
+
+
+def test_a_fund_selling_down_its_stake_is_not_insider_selling():
+    # Silver Lake's funds file as directors "by deputization" and 10% owners; their DELL exit read as -$879M
+    # of insider selling in 30 days against ~$60M by executives (2026-09-25).
+    from desk.edgar import parse_form4
+    fund = parse_form4(_form4([("Silver Lake Partners IV", 1, 0, 1)], [(100000, 150.0)]))
+    assert all(t["holder"] for t in fund["transactions"])
+    ceo = parse_form4(_form4([("Founder CEO", 1, 1, 1)], [(1000, 150.0)]))            # a founder-CEO is an insider
+    officer = parse_form4(_form4([("CFO", 0, 1, 0)], [(1000, 150.0)]))
+    assert not any(t["holder"] for t in ceo["transactions"] + officer["transactions"])
+
+
+def test_large_holder_sales_are_reported_beside_insider_flow_not_netted_in(tmp_path):
+    rows = [{"code": "S", "usd": 8_000_000.0, "price": 150.0, "filed": "2026-09-20", "plan": False, "holder": True}] * 100 \
+        + [{"code": "S", "usd": 5_000_000.0, "price": 150.0, "filed": "2026-09-20", "plan": False, "holder": False}]
+    out = _fb_with_edgar(tmp_path, rows)._edgar("DELL", spot=150.0)
+    assert out["insider_net_buy_30d"] == -5_000_000                   # executives only
+    assert out["large_holder_net_30d"] == -800_000_000                 # the fund, separately
+    assert out["insider_signal"] == "ok"
+    assert out["insider_transactions_90d"] == out["insider_transactions_30d"] == 1      # the executive's row only
+
+
+def test_a_foreign_issuer_has_no_insider_signal_rather_than_an_unusable_one(tmp_path):
+    # UMC's insiders are exempt from Section 16; its stray TWD-priced rows read as "unavailable" every day.
+    from datetime import date
+    fb = _fb_with_edgar(tmp_path, [{"code": "S", "usd": 1e6, "price": 45.0, "filed": "2026-09-20"}])
+    fb.edgar.filings = lambda cik, since: [{"form": "6-K", "date": date(2026, 9, 1), "accession": "a", "items": "", "doc": "d"}]
+    out = fb._edgar("UMC", spot=24.0)
+    assert out["insider_signal"].startswith("not applicable") and out["insider_net_buy_30d"] is None
+
+
+def test_no_earnings_before_the_horizon_is_stated_not_left_null():
+    from datetime import date
+    from desk import facts as F
+    fb = F.FactBuilder.__new__(F.FactBuilder)
+    fb.cfg = {"facts": {"exclude_earnings_within_days": 5}, "exits": {"max_hold_days": 60}}
+    fb.today, fb.earnings_failed = date(2026, 9, 25), set()
+    none = fb._earnings("HPE", {"HPE": None})
+    assert none["earnings_date"] is None and none["earnings_none_through"] == "2026-12-01"   # 60 + 7 days on
+    assert "earnings_none_through" not in fb._earnings("MU", {"MU": "2026-09-30"})
+
+
+def test_social_history_accumulates_while_the_guard_is_off(tmp_path, monkeypatch):
+    # The guard needs ~15 sessions of history to switch on; it was recorded only while on, so it never could.
+    import io
+    import json
+    from datetime import date
+    from desk import facts as F
+    fb = F.FactBuilder.__new__(F.FactBuilder)
+    fb.fcfg, fb.today = {"social_enabled": False}, date(2026, 9, 25)
+    msgs = {"messages": [{"created_at": "2026-09-25T10:00:00Z", "entities": {}}] * 3}
+    monkeypatch.setattr(F.urllib.request, "urlopen", lambda req, timeout=15: io.BytesIO(json.dumps(msgs).encode()))
+    hist = {}
+    out = fb._social("TXG", hist)
+    assert out == {"social_msgs_per_day": None, "social_bullish_share": None, "social_z": None}   # nothing exposed
+    assert "2026-09-25" in hist["TXG"]                                                             # but recorded
+    fb.fcfg = {"social_enabled": True}
+    assert fb._social("TXG", hist)["social_msgs_per_day"] is not None

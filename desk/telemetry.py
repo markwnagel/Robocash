@@ -102,8 +102,23 @@ def start_run(job: str) -> str:
     h = _LogHandler(level=logging.WARNING)
     logging.getLogger().addHandler(h)
     _run["handler"] = h
-    emit({"event": "run_start", "pid": os.getpid()})
+    emit({"event": "run_start", "pid": os.getpid(), "trigger": trigger(), "args": redact(" ".join(sys.argv[1:]))[:200]})
     return _run["id"]
+
+
+def trigger() -> str:
+    """'launchd' for a scheduled run, 'manual' for anything a person or script started. launchd sets
+    XPC_SERVICE_NAME to the job's label; without this, dev and print-only runs were mixed into the scheduled
+    runs' durations and baselines (monitor F-14, 2026-09-25)."""
+    return "launchd" if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.alpaca-desk.") else "manual"
+
+
+def is_production(start: dict, end: dict | None) -> bool:
+    """A scheduled run that did real work: launched by launchd (or from before trigger was recorded), not a
+    dry run and not print-only."""
+    if start.get("trigger", "launchd") != "launchd":
+        return False
+    return not (end and (end.get("dry_run") or end.get("print_only")))
 
 
 def note(**fields) -> None:
@@ -126,7 +141,11 @@ def end_run(status: str, error: str | None = None) -> None:
 
 
 def run_job(job: str, fn) -> None:
-    """Run a job's main() between run_start and run_end. A crash is recorded, then re-raised unchanged."""
+    """Run a job's main() between run_start and run_end. A crash is recorded, then re-raised unchanged.
+    --help is not a run: it was being logged as one and counted by the monitor."""
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        fn()
+        return
     start_run(job)
     try:
         fn()

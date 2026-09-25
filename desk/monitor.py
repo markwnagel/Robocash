@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 
 import yaml
 
-from .telemetry import signature
+from .telemetry import is_production, signature
 
 # launchd Weekday: 0 or 7 = Sunday, 1 = Monday ... 6 = Saturday.
 def _py_weekday(launchd_wd: int) -> int:
@@ -140,25 +140,30 @@ def job_signals(events: list, now: datetime, orphan_after: timedelta = timedelta
     starts = {e["run_id"]: e for e in events if e.get("event") == "run_start"}
     ends = {e["run_id"]: e for e in events if e.get("event") == "run_end"}
     jobs = defaultdict(lambda: {"started": 0, "ended": 0, "status": Counter(), "durations": [], "orphaned": [],
-                                "in_progress": [], "errors": [], "fields": []})
+                                "in_progress": [], "errors": [], "fields": [], "kinds": Counter()})
     for rid, s in starts.items():
         j = jobs[s["job"]]
         j["started"] += 1
         end = ends.get(rid)
+        prod = is_production(s, end)
+        j["kinds"]["scheduled" if prod else "manual_or_test"] += 1
         if end is None:
             (j["orphaned"] if now - _ts(s) > orphan_after else j["in_progress"]).append(
                 {"run_id": rid, "started": s["ts"]})
             continue
         j["ended"] += 1
         j["status"][end.get("status")] += 1
-        j["durations"].append(end.get("duration_s"))
+        if prod:                  # a dry run's 1-second duration is not the job's latency
+            j["durations"].append(end.get("duration_s"))
         if end.get("error"):
             j["errors"].append({"run_id": rid, "ts": end["ts"], "error": end["error"]})
         extra = {k: v for k, v in end.items()
                  if k not in ("ts", "run_id", "job", "event", "status", "duration_s", "error")}
-        j["fields"].append({"run_id": rid, "ts": end["ts"], "status": end.get("status"), **extra})
+        j["fields"].append({"run_id": rid, "ts": end["ts"], "status": end.get("status"),
+                            "trigger": s.get("trigger"), "scheduled": prod, **extra})
     return {k: {**{x: v[x] for x in ("started", "ended", "orphaned", "in_progress", "errors")},
-                "status": dict(v["status"]), "duration_s": robust(v["durations"]), "runs": v["fields"][-5:]}
+                "status": dict(v["status"]), "kinds": dict(v["kinds"]),
+                "duration_s_scheduled": robust(v["durations"]), "runs": v["fields"][-5:]}
             for k, v in jobs.items()}
 
 

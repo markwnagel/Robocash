@@ -16,8 +16,10 @@ is PROTECT-ONLY: sync, the kill switch and the stop check, no decisions. --force
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
+import re
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -26,7 +28,7 @@ import numpy as np
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 
-from desk.analyst import apply_verdicts, red_team, review
+from desk.analyst import analyst_rules, apply_verdicts, red_team, review
 from desk.config import alpaca_keys, load_config, require_paper
 from desk.data import SESSION_DONE, build_universe, cached_bars
 from desk.execution import Broker, sync_positions
@@ -137,6 +139,7 @@ def main() -> None:
         protect(st, broker, exits, notes)
         execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open)
     finally:
+        st["manual_open"] = age_manual_actions(notes, st.get("manual_open") or {}, today)
         if not args.dry_run:
             st["last_run"] = today.isoformat()
             save_state(st)
@@ -308,7 +311,14 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
 
     facts, pool, facts_failed = {}, [], False
     if cfg["facts"]["enabled"] and not cfg["facts"].get("social_enabled", True):
-        notes.append("social crowding guard: disabled in config (no history yet) - not screening for pumps")
+        hist_path = Path(cfg["_root"]) / "state" / "social_history.json"
+        try:
+            hist = json.loads(hist_path.read_text()) if hist_path.exists() else {}
+        except (OSError, ValueError):
+            hist = {}
+        ready = sum(1 for v in hist.values() if len(v) >= 15)
+        notes.append(f"social crowding guard: off, collecting history ({ready} of {len(hist)} names have the 15 "
+                     f"sessions it needs) - not screening for pumps yet")
     if cfg["facts"]["enabled"]:
         pool = [s for s in snap[snap["eligible"]].index if s not in st["positions"]][: cfg["facts"]["candidate_pool"]]
         try:
@@ -415,8 +425,10 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                         "day_return": round(decision.daily_return, 4), "kill_switch_at": rcfg["max_drawdown_pct"]},
             "limits": {"max_positions": pcfg["max_positions"], "target_positions": target_positions,
                        "max_position_pct": day_pcfg["max_position_pct"], "max_hold_days": ecfg["max_hold_days"]},
+            "rules": analyst_rules(cfg),
             "holdings": [
-                {"symbol": s, **{k: p.get(k) for k in ("entry_date", "entry_price", "qty", "stop", "target", "last_price", "thesis", "adds")},
+                {"symbol": s, **{k: p.get(k) for k in ("entry_date", "entry_price", "qty", "stop", "target", "last_price", "adds")},
+                 "thesis_at_entry": p.get("thesis"),
                  "days_held": (today - date.fromisoformat(p["entry_date"])).days,
                  "exit_planned": exits.get(s),
                  "facts": compact(facts[s]) if s in facts else None}
@@ -582,6 +594,22 @@ def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, ses
         if not args.dry_run:
             st["positions"][a["symbol"]].update(add_order_id=oid, add_date=today.isoformat())
             save_state(st)
+
+
+def age_manual_actions(notes: list, open_since: dict, today: date) -> dict:
+    """Mark each MANUAL ACTION note with the day it was first raised, and return the open set to save. A
+    cap breach used to read the same on day 1 and day 5 (monitor F-12). Keyed on the note with its numbers
+    blanked, so UMC's cap breach stays one item as its weight moves; an item that stops appearing is closed."""
+    now_open = {}
+    for i, n in enumerate(notes):
+        if not n.startswith("MANUAL ACTION"):
+            continue
+        k = re.sub(r"\d[\d.,]*", "#", n)[:90]
+        first = open_since.get(k, today.isoformat())
+        now_open[k] = first
+        if first < today.isoformat():
+            notes[i] = f"{n} [open since {first}]"
+    return now_open
 
 
 def render_brief(mode, today, acct, decision, st, exits, entries, notes, headline, cfg, adds=None, target=None) -> str:

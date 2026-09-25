@@ -452,7 +452,8 @@ def test_reduce_on_a_holding_reaches_the_brief_and_never_sells(wired, cfg, monke
         "verdicts": [{"symbol": "S03", "action": "REDUCE", "reason": "insider selling", "confidence": 0.5}]})
     run([])
     assert "S03" not in holder["broker"].closed        # a REDUCE is never escalated into a sale
-    assert "flagged REDUCE" in sent[-1] and "insider selling" in sent[-1]
+    assert "analyst concern on S03" in sent[-1] and "insider selling" in sent[-1]
+    assert "MANUAL ACTION" not in sent[-1]
 
 
 def test_bar_cache_prunes_only_stale_panels(tmp_path):
@@ -579,3 +580,18 @@ def test_a_cap_breach_is_raised_every_run_and_leads_the_brief(wired, cfg):
     notes = brief.split("Notes:", 1)[1].splitlines()
     assert notes[1].startswith("  - MANUAL ACTION: S03 is 10.8% of equity, above the 10% cap - sell 4 share(s)")
     assert "S03" not in holder["broker"].closed                      # reported, never auto-trimmed
+
+
+def test_manual_actions_carry_the_day_they_were_first_raised():
+    from datetime import date
+    from run_daily import age_manual_actions
+    d1 = ["MANUAL ACTION: UMC is 10.6% of equity, above the 10% cap - sell 3 share(s) to get back under", "regime note"]
+    open1 = age_manual_actions(d1, {}, date(2026, 9, 24))
+    assert d1[0].endswith("get back under")                          # new today: no age yet
+    d2 = ["MANUAL ACTION: UMC is 10.7% of equity, above the 10% cap - sell 4 share(s) to get back under",
+          "MANUAL ACTION: S02 has NO protective stop"]
+    open2 = age_manual_actions(d2, open1, date(2026, 9, 25))
+    assert d2[0].endswith("[open since 2026-09-24]")                  # same breach as its weight moves
+    assert not d2[1].endswith("]")                                    # a different, new item
+    open3 = age_manual_actions(["regime note"], open2, date(2026, 9, 28))
+    assert open3 == {}                                                # resolved items close

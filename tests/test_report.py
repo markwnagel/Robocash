@@ -338,3 +338,32 @@ def test_email_lists_holdings_and_links_every_ticker():
     assert 'href="https://www.google.com/finance/quote/SPY:NYSEARCA"' in html.split("Performance vs SPY")[1][:3000]
     # A ticker with no verified exchange stays plain bold text.
     assert "<b>TXG</b>" in html
+
+
+def test_the_email_waits_for_a_slow_desk_run_then_says_so():
+    """Desk at 13:45, email at 14:00, desk p95 ~5 minutes: a slow run used to leave the email reading a
+    missing brief with nothing to say so (monitor F-15, 2026-09-25)."""
+    from datetime import date
+    import report_daily as rd
+    t = {"now": 0.0}
+    clock, sleep = (lambda: t["now"]), (lambda s: t.__setitem__("now", t["now"] + s))
+    seq = iter(["running", "running", "done"])
+    assert rd.wait_for_desk(date(2026, 9, 25), True, clock=clock, sleep=sleep, status=lambda d: next(seq)) is None
+    assert t["now"] == 60                                             # two polls, then done
+    t["now"] = 0.0
+    msg = rd.wait_for_desk(date(2026, 9, 25), True, minutes=1, clock=clock, sleep=sleep, status=lambda d: "running")
+    assert msg and "still running" in msg and "launchd.log" in msg
+    assert rd.wait_for_desk(date(2026, 9, 26), False, status=lambda d: "missing") is None     # holiday: no wait
+
+
+def test_desk_status_reads_the_brief_and_unfinished_runs(tmp_path):
+    from datetime import date
+    import report_daily as rd
+    from desk import telemetry as T
+    today = date.today()
+    assert rd.desk_status(today, tmp_path) == "missing"
+    T.start_run("desk")
+    assert rd.desk_status(today, tmp_path) == "running"
+    (tmp_path / f"{today.isoformat()}.md").write_text("DESK BRIEF")
+    T.end_run("ok")
+    assert rd.desk_status(today, tmp_path) == "done"
