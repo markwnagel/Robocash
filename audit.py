@@ -20,7 +20,7 @@ from desk.config import ROOT, alpaca_keys, load_config
 from desk.data import cached_bars
 from desk.notify import send
 from desk import telemetry
-from desk.state import BRIEFS_DIR, STATE_DIR, TRADES_FILE, load_state
+from desk.state import BRIEFS_DIR, STATE_DIR, TRADES_FILE, atomic_write_text, load_state
 
 log = logging.getLogger("desk.audit")
 
@@ -99,6 +99,26 @@ def post_exit_return(closes: pd.DataFrame, symbol: str, exit_date, exit_price, p
     return float(after.iloc[post_days - 1] / float(exit_price) - 1)
 
 
+def trials_section(cfg: dict) -> str:
+    """The backtest evidence at a glance, and whether the README table still matches the log."""
+    from desk import trials as T
+    log = T.load(ROOT / "state" / "history" / "trials.jsonl")
+    s = T.summary(log, int((cfg.get("backtest") or {}).get("prior_untracked_trials", 0)))
+    if not s["rows"]:
+        return "BACKTEST TRIALS\n  none logged yet"
+    cur = s["current"]
+    out = ["BACKTEST TRIALS", f"  {s['runs']} runs, N = {s['n_trials']} trials; window {s['window'][1]} to {s['window'][2]}"]
+    if cur:
+        out.append(f"  current config: Deflated Sharpe {cur['dsr']:.2f} (bar 0.95), max DD {cur['maxdd']:.1%}")
+    best = s["rows"][0]
+    if cur and best is not cur:
+        out.append(f"  highest: {best['label']} {best['dsr']:.2f} - a candidate for --stagger, not a switch")
+    lag = T.readme_lag(ROOT / "README.md", log)
+    if lag:
+        out.append(f"  README table is {lag} run(s) behind: python scripts/trials_report.py --write-readme")
+    return "\n".join(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stats", action="store_true", help="print deterministic stats only")
@@ -140,6 +160,7 @@ def main() -> None:
                      role="auditor")
     if not out:
         send(f"AUDIT {today}: auditor unavailable. Stats: {json.dumps(stats)}", cfg)
+        telemetry.note(auditor="unavailable", trades=stats.get("n_trades", 0))
         return
     lines = [f"WEEKLY AUDIT {today.isoformat()}", out["summary"], f"Sample size: {out['sample_size_warning']}", ""]
     for f in out["findings"]:
@@ -149,11 +170,13 @@ def main() -> None:
         for c in out["proposed_changes"]:
             lines.append(f"  {c['config_key']}: {c['current']} -> {c['proposed']}\n    why: {c['rationale']}\n    check: {c['backtest_check']}")
     lines.append("\nSTATS\n" + json.dumps(stats, indent=1))
+    lines.append("\n" + trials_section(cfg))
     text = "\n".join(lines)
     out_dir = STATE_DIR / "audits"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"{today.isoformat()}.md").write_text(text)
+    atomic_write_text(out_dir / f"{today.isoformat()}.md", text)
     send(text, cfg)
+    telemetry.note(auditor="ok", trades=stats.get("n_trades", 0), proposed_changes=len(out["proposed_changes"]))
 
 
 if __name__ == "__main__":

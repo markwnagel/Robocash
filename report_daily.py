@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -20,14 +21,16 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
 
-from desk.config import alpaca_keys, load_config
+from desk.config import alpaca_keys, load_config, require_paper
 from desk.data import fetch_daily_bars
 from desk.notify import send, send_email
-from desk.report import (build_report, diff_fingerprint, fingerprint, load_json, movers, notable_news,
-                         performance, plain_summaries)
+from desk.report import (build_report, diff_fingerprint, fingerprint, holdings_at_close, load_json, movers,
+                         notable_news, performance, plain_summaries, quote_url)
 from desk.report_html import build_html
 from desk import telemetry
-from desk.state import STATE_DIR, load_state
+from desk import trials as T
+from desk.evidence import live_vs_backtest
+from desk.state import STATE_DIR, atomic_write_text, load_state
 
 log = logging.getLogger("desk.report")
 DEAD = {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day", "stopped", "suspended"}
@@ -81,6 +84,32 @@ def health_today(today: date) -> dict:
     return h
 
 
+def evidence_today(cfg: dict, equity: pd.Series) -> dict:
+    """Live volatility and drawdown against the current config's backtest, plus whether the reference
+    still describes the config that is running."""
+    ref = load_json(Path(cfg["_root"]) / "state" / "history" / "live_reference.json", None)
+    ev = live_vs_backtest(equity, ref)
+    if ref:
+        ev["stale_reference"] = ref.get("config_id") != T.current_config_id(cfg)
+    return ev
+
+
+def research_line(cfg: dict, seen: int | None) -> tuple:
+    """(line or None, runs now). Shown only when backtests were logged since the last email."""
+    log = T.load(Path(cfg["_root"]) / "state" / "history" / "trials.jsonl")
+    if seen is None or len(log) <= seen:
+        return None, len(log)
+    s = T.summary(log, int((cfg.get("backtest") or {}).get("prior_untracked_trials", 0)))
+    cur = s.get("current")
+    line = f"{len(log) - seen} new backtest run(s) since the last email"
+    if cur:
+        line += f"; current config Deflated Sharpe {cur['dsr']:.2f} (N = {s['n_trials']}, bar 0.95)"
+    lag = T.readme_lag(Path(cfg["_root"]) / "README.md", log)
+    if lag:
+        line += f"; README table {lag} run(s) behind"
+    return line, len(log)
+
+
 def brief_notes(today: date) -> list:
     p = STATE_DIR / "briefs" / f"{today.isoformat()}.md"
     if not p.exists():
@@ -97,6 +126,21 @@ def brief_notes(today: date) -> list:
     return out
 
 
+def deliver(today: date, subject: str, text: str, html: str, cfg: dict, markers: dict) -> str:
+    """Save the report, email it, then write `markers` ({path: text}: the change-log fingerprint and the
+    research counter). The markers advance only once a report went out, or mail is deliberately off: they
+    were written before sending, so a failed send lost that day's "what changed" from every later email."""
+    out = STATE_DIR / "reports"
+    atomic_write_text(out / f"{today.isoformat()}.txt", text)
+    atomic_write_text(out / f"{today.isoformat()}.html", html)
+    status = send_email(subject, text, cfg, html=html)
+    log.info("report: %s", status)
+    if "FAILED" not in status:
+        for path, body in markers.items():
+            atomic_write_text(path, body)
+    return status
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--print", dest="print_only", action="store_true", help="build and print; send nothing, save nothing")
@@ -108,7 +152,7 @@ def main() -> None:
     root = Path(cfg["_root"])
     today = date.today()
     key, secret = alpaca_keys()
-    trading = TradingClient(key, secret, paper=cfg["account"]["paper"])
+    trading = TradingClient(key, secret, paper=require_paper(cfg))
     data = StockHistoricalDataClient(key, secret)
     st = load_state()
 
@@ -126,9 +170,8 @@ def main() -> None:
             "symbol": p.symbol, "qty": float(p.qty), "price": float(p.current_price),
             "entry_price": float(p.avg_entry_price), "day_pct": float(p.unrealized_intraday_plpc or 0),
             "total_pct": float(p.unrealized_plpc or 0), "stop": sp.get("stop"),
-            "filled_today": p.symbol in filled_today, "thesis": sp.get("thesis", ""),
+            "filled_today": p.symbol in filled_today, "thesis": sp.get("thesis", ""), "entry_date": sp.get("entry_date"),
         })
-    unrealized = sum(float(p.unrealized_pl or 0) for p in live)
 
     staged = []
     for o in orders:
@@ -158,19 +201,42 @@ def main() -> None:
     new_fp = fingerprint(root)
     changes = diff_fingerprint(load_json(fp_path, {}), new_fp)
 
+    seen_path = STATE_DIR / "reports" / "research_seen.json"
+    research = research_line(cfg, load_json(seen_path, {}).get("runs"))
     closed = closed_today(today, orders, st, {p["symbol"] for p in positions})
+    held = [p["symbol"] for p in positions]
+    try:
+        closes = fetch_daily_bars(data, held, 10, cfg["data"]["feed"])["close"] if held else None
+    except Exception as e:
+        log.warning("closing prices unavailable, holdings marked at the live price: %s", e)
+        closes = None
+    news = notable_news(facts, held)
+    tickers = set(held) | {s["symbol"] for s in staged} | {c["symbol"] for c in closed} | {n["symbol"] for n in news} | {"SPY"}
+    links = {}
+    for sym in sorted(tickers):
+        try:
+            url = quote_url(sym, trading.get_asset(sym).exchange.value)
+        except Exception:
+            url = None
+        if url:
+            links[sym] = url
     moves = ([{"kind": "sold", **c} for c in closed]
              + [{"kind": "bought", **p} for p in positions if p.get("filled_today")])
+    holdings = holdings_at_close(positions, closes, float(acct.cash))
 
     ctx = {
         "day": today, "now": datetime.now().astimezone(), "equity": equity, "day_pl": equity - last_equity,
         "day_pct": (equity / last_equity - 1) if last_equity else 0.0,
-        "cash": float(acct.cash), "positions": positions, "unrealized": unrealized,
+        # One unrealized figure in the whole email: the holdings table's, at the official close. The broker's
+        # unrealized_pl is at the after-hours mark and put a second, different number two lines above it.
+        "cash": float(acct.cash), "positions": positions, "unrealized": holdings["pnl"],
         "closed_today": closed, "staged": staged, "perf": perf,
         "moves_plain": plain_summaries(moves, cfg),
-        "movers": movers(positions), "news": notable_news(facts, [p["symbol"] for p in positions]),
+        "movers": movers(positions), "news": news, "quote_links": links,
+        "holdings": holdings,
         "changes": changes, "halted": st.get("halt_reason") if st.get("halted") else None,
         "notes": brief_notes(today), "health": health_today(today),
+        "evidence": evidence_today(cfg, eq_series), "research": research[0],
         "manual": [n.split(":", 1)[1].strip() for n in brief_notes(today) if n.startswith("MANUAL ACTION")],
     }
     text, html = build_report(ctx), build_html(ctx)
@@ -182,14 +248,10 @@ def main() -> None:
             Path(args.html_out).write_text(html)
             print(f"\n[html written to {args.html_out}]")
         return
-    out = STATE_DIR / "reports"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / f"{today.isoformat()}.txt").write_text(text)
-    (out / f"{today.isoformat()}.html").write_text(html)
-    fp_path.write_text(__import__("json").dumps(new_fp, indent=1, sort_keys=True, default=str))
-    status = send_email(f"TeamRobo daily {today.isoformat()} | {equity:,.0f} ({equity / last_equity - 1:+.2%})"
-                        if last_equity else f"TeamRobo daily {today.isoformat()}", text, cfg, html=html)
-    log.info("report: %s", status)
+    subject = (f"TeamRobo daily {today.isoformat()} | {equity:,.0f} ({equity / last_equity - 1:+.2%})"
+               if last_equity else f"TeamRobo daily {today.isoformat()}")
+    status = deliver(today, subject, text, html, cfg, {fp_path: json.dumps(new_fp, indent=1, sort_keys=True, default=str),
+                                                        seen_path: json.dumps({"runs": research[1]})})
     telemetry.note(email="sent" if status.startswith("emailed") else "failed" if "FAILED" in status else "skipped",
                    email_detail=status)
     print(text)

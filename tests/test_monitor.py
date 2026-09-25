@@ -353,7 +353,7 @@ def test_monitor_uses_the_models_report_and_the_fallback_opt_in(mon, monkeypatch
               "resolved_finding_ids": [], "escalate": False, "escalation_summary": ""}
     seen = {}
     monkeypatch.setattr(job.anthropic, "Anthropic", _fake_anthropic(result, seen=seen))
-    monkeypatch.setattr(job, "hard_alarms", lambda runs, jobs, tdays: [])
+    monkeypatch.setattr(job, "hard_alarms", lambda runs, jobs, tdays, events=None: [])
     _run_monitor(job, [])
     assert seen["fallbacks"] == "default" and seen["betas"] == ["server-side-fallback-2026-07-01"]
     assert seen["output_config"]["format"]["schema"] is M.MONITOR_SCHEMA
@@ -370,7 +370,7 @@ def test_monitor_uses_the_models_report_and_the_fallback_opt_in(mon, monkeypatch
 def test_monitor_falls_back_when_the_model_refuses(mon, monkeypatch):
     job, sent, tmp = mon
     monkeypatch.setattr(job.anthropic, "Anthropic", _fake_anthropic(None, stop="refusal"))
-    monkeypatch.setattr(job, "hard_alarms", lambda runs, jobs, tdays: [])
+    monkeypatch.setattr(job, "hard_alarms", lambda runs, jobs, tdays, events=None: [])
     _run_monitor(job, [])
     latest = json.loads((tmp / "monitor" / "latest.json").read_text())
     assert latest["analysis"] == "deterministic" and "refused" in latest["summary"]

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import traceback
 import uuid
@@ -26,8 +27,8 @@ from . import state
 DIR: Path | None = None          # tests point this at a temp dir; default is state/telemetry
 
 # USD per million tokens, Anthropic first-party list prices (claude-api reference, cached 2026-06-24).
-# Cache writes bill at 1.25x input (5-minute TTL), cache reads at 0.1x. Web-search charges are not in
-# these figures; the count is recorded as web_searches so they can be priced separately.
+# Cache writes bill at 1.25x input (5-minute TTL), cache reads at 0.1x. cost_usd is tokens only; web searches
+# bill separately at $10 per 1,000 and are recorded as web_search_usd beside it.
 PRICES = {
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (2.00, 10.00),
@@ -35,6 +36,7 @@ PRICES = {
     "claude-haiku-4-5": (1.00, 5.00),
 }
 CACHE_WRITE_X, CACHE_READ_X = 1.25, 0.10
+WEB_SEARCH_USD = 0.01
 
 _run = {"id": None, "job": None, "t0": None, "fields": {}, "handler": None}
 
@@ -73,8 +75,11 @@ def emit(event: dict) -> None:
         d.mkdir(parents=True, exist_ok=True)
         with open(d / f"{now.date().isoformat()}.jsonl", "a") as f:
             f.write(json.dumps(rec, default=str) + "\n")
-    except Exception:  # telemetry must never be the reason a run fails
-        pass
+    except Exception as e:  # telemetry must never be the reason a run fails - but a gap in it must be visible
+        try:
+            sys.stderr.write(f"telemetry: event not recorded ({type(e).__name__}: {e})\n")
+        except Exception:
+            pass
 
 
 class _LogHandler(logging.Handler):
@@ -174,6 +179,7 @@ def llm_call(role: str, model: str, started: float, responses: list | None = Non
           "fallback": bool(last is not None and served != model), "outcome": outcome,
           "stop_reason": getattr(last, "stop_reason", None), "turns": len(responses),
           "latency_s": round(time.monotonic() - started, 2), **u, "cost_usd": cost_usd(served, u),
+          "web_search_usd": round(u["web_searches"] * WEB_SEARCH_USD, 4),
           "error": redact(error)[:500] if error else None, **fields})
 
 

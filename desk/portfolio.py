@@ -2,16 +2,54 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
+
+# Rules the live run and the backtest must apply identically. Each used to be written out twice.
+ENTRY_LIMIT_MULT = 1.005        # entry limit = signal close x this (0.5% above)
+
+
+def entry_limit(price: float) -> float:
+    return round(price * ENTRY_LIMIT_MULT, 2)
+
+
+def shrink_qty(qty: int, factor: float) -> int:
+    """Every size cut (analyst REDUCE, implied-vol half size, simulated vetoes): floored so it never rounds
+    back up, never below one share so a cut never turns into a silent exclusion, and the factor is clamped
+    to at most 1 so no rule written as a cut can enlarge a position."""
+    return max(1, math.floor(qty * min(1.0, max(0.0, float(factor)))))
+
+
+def decay_exit(snap: pd.DataFrame, sym: str, held_days: int, ecfg: dict) -> str | None:
+    """Signal-decay rule for a holding: None = keep, "decay" = exit, "defer" = no complete bar today. A name
+    missing from the snapshot (trading halt, feed gap) says nothing about its ranking, so the check waits."""
+    if held_days < ecfg["min_hold_days"]:
+        return None
+    if sym not in snap.index:
+        return "defer"
+    if not bool(snap.loc[sym, "eligible"]) or snap.loc[sym, "rank"] > ecfg["signal_decay_rank"]:
+        return "decay"
+    return None
 
 
 def too_correlated(sym: str, basket: list, returns: pd.DataFrame, pcfg: dict) -> bool:
+    """More than max_correlated_peers holdings correlated above the threshold over the last correlation_days.
+    Pairwise-complete Pearson, computed exactly as DataFrame.corrwith does (np.corrcoef on the rows where both
+    have data) without its per-column apply machinery, which was a fifth of the backtest's run time."""
     peers = [b for b in basket if b in returns.columns and b != sym]
     if not peers or sym not in returns.columns:
         return False
     window = returns.tail(pcfg["correlation_days"])
-    corr = window[peers].corrwith(window[sym])
-    return int((corr > pcfg["correlation_threshold"]).sum()) > pcfg["max_correlated_peers"]
+    x = window[sym].to_numpy(dtype=float)
+    x_ok = ~np.isnan(x)
+    threshold, hits = pcfg["correlation_threshold"], 0
+    with np.errstate(all="ignore"):
+        for p in peers:
+            y = window[p].to_numpy(dtype=float)
+            ok = x_ok & ~np.isnan(y)
+            if ok.any() and np.corrcoef(x[ok], y[ok])[0, 1] > threshold:
+                hits += 1
+    return hits > pcfg["max_correlated_peers"]
 
 
 def select_entries(snap: pd.DataFrame, returns: pd.DataFrame, held: list, slots: int, pcfg: dict) -> list:

@@ -1,29 +1,39 @@
 #!/usr/bin/env python
 """Daily desk run. Schedule after the US close (e.g. 16:45 ET) on weekdays.
 
-  python run_daily.py --dry-run        stage orders without submitting
+  python run_daily.py --dry-run        stage orders without submitting; writes no state, brief or webhook
   python run_daily.py                  live run against the configured (paper) account
   python run_daily.py --resume         clear a kill-switch halt, then run
+
+Three phases. DECIDE reads bars, facts and the AI roles and plans exits and entries; it places no order
+except a trailing-stop ratchet. PROTECT checks every holding for a live broker-side stop. EXECUTE sends exits,
+entries and adds. If DECIDE fails (a data outage, a bug), PROTECT and the brief still run and the error is
+re-raised afterwards, so a crash never leaves a position filled this morning without a stop tonight.
+
+Launched before the day's bars are final (market open, or before 16:20 ET - a Mac that woke late), the run
+is PROTECT-ONLY: sync, the kill switch and the stop check, no decisions. --force runs everything anyway.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 
 from desk.analyst import apply_verdicts, red_team, review
-from desk.config import alpaca_keys, load_config
-from desk.data import build_universe, cached_bars
+from desk.config import alpaca_keys, load_config, require_paper
+from desk.data import SESSION_DONE, build_universe, cached_bars
 from desk.execution import Broker, sync_positions
 from desk.facts import FactBuilder, candidate_blockers, compact, insider_tilt, size_multiplier
 from desk.notify import send
-from desk.portfolio import pyramid_due, select_entries, size_position, trail_stop
+from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries, shrink_qty, size_position,
+                            trail_stop)
 from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import can_exit_today, enforce_entry_limits, evaluate
 from desk.signals import compute_panels, rerank, snapshot
@@ -31,11 +41,18 @@ from desk import telemetry
 from desk.state import load_state, save_state, write_brief
 
 log = logging.getLogger("desk")
+ET = ZoneInfo("America/New_York")
+NO_STOP = "has NO protective stop"          # telemetry and the monitor count notes containing this
+
+
+def now_et() -> datetime:
+    """Wall clock in New York. One function so tests can pin the time of day."""
+    return datetime.now(ET)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true", help="compute and print, submit nothing, save no state")
+    ap.add_argument("--dry-run", action="store_true", help="compute and print; submit nothing, save no state")
     ap.add_argument("--no-analyst", action="store_true")
     ap.add_argument("--resume", action="store_true", help="clear a kill-switch halt")
     ap.add_argument("--refresh-universe", action="store_true")
@@ -54,20 +71,21 @@ def main() -> None:
             msg = (f"HARD FLOOR halt ({st.get('halt_reason')}) is not cleared by --resume alone. "
                    "Re-run with --resume --reset-hwm to acknowledge re-baselining the all-time high.")
             log.error(msg)
-            send(msg, cfg)
+            publish(msg, today, cfg, args.dry_run, brief=False)
             return
         st.update(halted=False, hard_halted=False, halt_reason="", halt_date="")
         st["high_water_mark"] = 0.0  # episode HWM re-baselines so the same drawdown doesn't re-trip immediately
         if args.reset_hwm:
             st["all_time_hwm"] = 0.0
-        save_state(st)
+        if not args.dry_run:
+            save_state(st)
         log.info("halt cleared%s", " (all-time high reset)" if args.reset_hwm else "")
 
     key, secret = alpaca_keys()
-    trading = TradingClient(key, secret, paper=cfg["account"]["paper"])
+    trading = TradingClient(key, secret, paper=require_paper(cfg))
     data = StockHistoricalDataClient(key, secret)
     broker = Broker(trading, dry_run=args.dry_run)
-    mode = ("PAPER" if cfg["account"]["paper"] else "LIVE") + (" DRY-RUN" if args.dry_run else "")
+    mode = "PAPER" + (" DRY-RUN" if args.dry_run else "")
 
     if not args.force and not broker.is_trading_day(today):
         log.info("not a trading day; exiting")
@@ -76,57 +94,130 @@ def main() -> None:
 
     acct = broker.account()
     if acct["trading_blocked"]:
-        send(f"[{mode}] account is blocked by the broker; no action taken", cfg)
+        publish(f"[{mode}] account is blocked by the broker; no action taken", today, cfg, args.dry_run, brief=False)
         telemetry.note(status="blocked", reason="account blocked by broker")
         return
     live = broker.positions()
     notes = sync_positions(st, broker, live, today)
+    if not args.dry_run:
+        # Closes just appended to trades.csv and their removal from state land together: a run that dies
+        # later cannot log the same close again tomorrow.
+        save_state(st)
     decision = evaluate(acct["equity"], acct["last_equity"], st, cfg["risk"])
     notes += decision.notes
 
     if decision.halt:
-        if not st.get("halted"):
-            try:
-                broker.liquidate_all()
-                flat = "All positions liquidated."
-            except Exception as e:
-                # Record the halt regardless: the next run sees it and retries every survivor below.
-                log.error("liquidate_all failed: %s", e)
-                flat = f"LIQUIDATION FAILED ({type(e).__name__}: {e}) - retried next run; check the broker now."
-            for sym, pos in st["positions"].items():
-                pos["pending_exit_reason"] = "KILL SWITCH: " + decision.halt_reason
-            st.update(halted=True, hard_halted=decision.hard, halt_reason=decision.halt_reason, halt_date=today.isoformat())
-            how = "--resume --reset-hwm" if decision.hard else "--resume"
-            headline = f"KILL SWITCH FIRED - {decision.halt_reason}. {flat} Run with {how} to re-enable."
-        else:
-            how = "--resume --reset-hwm" if st.get("hard_halted") else "--resume"
-            headline = f"HALTED since {st['halt_date']} ({st['halt_reason']}). No trading. Run with {how} to re-enable."
-            # Anything still held survived the liquidation, and liquidate_all cancelled its stops first, so
-            # it is open with no protection. Re-send the close every halted run until it is gone.
-            resent = []
-            for sym in live:
-                try:
-                    broker.close(sym)
-                    resent.append(sym)
-                except Exception as e:
-                    log.error("kill-switch retry close %s failed: %s", sym, e)
-                    notes.append(f"{sym} STILL OPEN and the close was rejected ({type(e).__name__}: {e}) - "
-                                 f"close it at the broker")
-                if sym in st["positions"]:
-                    st["positions"][sym]["pending_exit_reason"] = f"KILL SWITCH (retry): {st['halt_reason']}"
-            if resent:
-                headline += (f" {len(resent)} position(s) survived the liquidation with no stop; "
-                             f"close re-sent: {', '.join(sorted(resent))}.")
+        run_halted(args, cfg, today, st, broker, live, acct, decision, notes, mode)
+        return
+
+    session_open = broker.market_open()
+    clock = now_et()
+    settling = time(16, 0) <= clock.time() < time(*SESSION_DONE)       # the close's prints still arriving
+    protect_only = (session_open or settling) and not args.force
+    plan, failure = {"exits": {}, "entries": [], "adds": [], "analyst_out": None, "analyst_status": "skipped",
+                     "stale": False, "target_positions": cfg["portfolio"]["target_positions"]}, None
+    headline = ""
+    if protect_only:
+        # Signals would read a partial day and exits would fill at once, not at the next open: leave every
+        # decision to the evening run. Sync, the kill switch (above) and the stop check still run.
+        headline = (f"PROTECT-ONLY RUN at {clock:%H:%M} ET, before today's bars are final: stops checked, no "
+                    f"exits or entries - the evening run decides (--force overrides)")
+    else:
+        try:
+            plan = decide(args, cfg, today, st, acct, live, decision, broker, trading, data, (key, secret), notes,
+                          session_open)
+        except Exception as e:
+            failure = e
+            log.exception("decision phase failed")
+            notes.append(f"MANUAL ACTION: the decision phase failed ({type(e).__name__}: "
+                         f"{telemetry.redact(str(e))[:200]}) - no exits or entries today; protective stops were "
+                         f"still checked. See state/launchd.log.")
+    exits, entries, adds = plan["exits"], plan["entries"], plan["adds"]
+    try:
+        protect(st, broker, exits, notes)
+        execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open)
+    finally:
         if not args.dry_run:
             st["last_run"] = today.isoformat()
             save_state(st)
-        brief = render_brief(mode, today, acct, decision, st, {}, [], notes, headline, cfg)
-        write_brief(brief, today)
-        send(brief, cfg)
-        telemetry.note(status="halted", reason=st.get("halt_reason"), hard=bool(st.get("hard_halted")),
-                       open_positions=len(live), notes=len(notes))
-        return
 
+    notes.sort(key=lambda n: not n.startswith("MANUAL ACTION"))
+    brief = render_brief(mode, today, acct, decision, st, exits, entries, notes, headline, cfg, adds,
+                         target=plan["target_positions"])
+    if plan["analyst_out"] and plan["analyst_out"].get("brief"):
+        brief += "\n\nANALYST\n" + plan["analyst_out"]["brief"]
+    publish(brief, today, cfg, args.dry_run)
+    count = lambda text: sum(text in n for n in notes)  # noqa: E731
+    telemetry.note(entries=len(entries), exits=len(exits), adds=len(adds), notes=len(notes), stale=plan["stale"],
+                   analyst=plan["analyst_status"], positions=len(st["positions"]), equity=round(acct["equity"], 2),
+                   manual_actions=count("MANUAL ACTION"), cap_breaches=count("% cap - sell"),
+                   unprotected=count(NO_STOP), protection_unverified=count("protection UNVERIFIED"),
+                   protection_replaced=count("protective stop re-placed"), order_errors=count("ORDER FAILED"),
+                   protection_mismatch=count("protection MISMATCH"),
+                   stop_not_raised=count("stop NOT raised"), decay_deferred=count("signal-decay check deferred"),
+                   data_concerns=count("data concern:"), session_open=session_open,
+                   partial_bar=count("session still in progress") > 0, regime=plan.get("regime", "n/a"),
+                   protect_only=protect_only, decision_failed=failure is not None)
+    if failure is not None:
+        raise failure
+
+
+def publish(text: str, today: date, cfg: dict, dry_run: bool, brief: bool = True) -> None:
+    """A dry run prints only. Writing its brief would replace the live run's under the same date, and the
+    14:00 email and the monitor both read that file."""
+    if dry_run:
+        print(text)
+        return
+    if brief:
+        write_brief(text, today)
+    send(text, cfg)
+
+
+def run_halted(args, cfg, today, st, broker, live, acct, decision, notes, mode) -> None:
+    if not st.get("halted"):
+        try:
+            broker.liquidate_all()
+            flat = "All positions liquidated."
+        except Exception as e:
+            # Record the halt regardless: the next run sees it and retries every survivor below.
+            log.error("liquidate_all failed: %s", e)
+            flat = f"LIQUIDATION FAILED ({type(e).__name__}: {e}) - retried next run; check the broker now."
+        for sym, pos in st["positions"].items():
+            pos["pending_exit_reason"] = "KILL SWITCH: " + decision.halt_reason
+        st.update(halted=True, hard_halted=decision.hard, halt_reason=decision.halt_reason, halt_date=today.isoformat())
+        how = "--resume --reset-hwm" if decision.hard else "--resume"
+        headline = f"KILL SWITCH FIRED - {decision.halt_reason}. {flat} Run with {how} to re-enable."
+    else:
+        how = "--resume --reset-hwm" if st.get("hard_halted") else "--resume"
+        headline = f"HALTED since {st['halt_date']} ({st['halt_reason']}). No trading. Run with {how} to re-enable."
+        # Anything still held survived the liquidation, and liquidate_all cancelled its stops first, so
+        # it is open with no protection. Re-send the close every halted run until it is gone.
+        resent = []
+        for sym in live:
+            try:
+                broker.close(sym)
+                resent.append(sym)
+            except Exception as e:
+                log.error("kill-switch retry close %s failed: %s", sym, e)
+                notes.append(f"MANUAL ACTION: {sym} STILL OPEN and the close was rejected ({type(e).__name__}: {e}) "
+                             f"- it {NO_STOP}; close it at the broker")
+            if sym in st["positions"]:
+                st["positions"][sym]["pending_exit_reason"] = f"KILL SWITCH (retry): {st['halt_reason']}"
+        if resent:
+            headline += (f" {len(resent)} position(s) survived the liquidation with no stop; "
+                         f"close re-sent: {', '.join(sorted(resent))}.")
+    if not args.dry_run:
+        st["last_run"] = today.isoformat()
+        save_state(st)
+    publish(render_brief(mode, today, acct, decision, st, {}, [], notes, headline, cfg), today, cfg, args.dry_run)
+    telemetry.note(status="halted", reason=st.get("halt_reason"), hard=bool(st.get("hard_halted")),
+                   halt_date=st.get("halt_date"), open_positions=len(live), notes=len(notes),
+                   unprotected=sum(NO_STOP in n for n in notes))
+
+
+def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, keys, notes, session_open) -> dict:
+    """Everything that needs bars, facts or the AI roles. Places no order except a trailing-stop ratchet."""
+    key, secret = keys
     universe = build_universe(trading, data, cfg, force=args.refresh_universe)
     symbols = sorted(set(universe) | set(st["positions"]))
     panel = cached_bars(data, symbols, cfg["data"]["history_days"], cfg)
@@ -142,10 +233,16 @@ def main() -> None:
         expected_bar -= timedelta(days=1)
     stale = last_bar < expected_bar and not args.force
     notes.append(f"data through {last_bar.isoformat()}" + (" - STALE, entries suppressed" if stale else ""))
+    clock = now_et()
+    if session_open and last_bar >= clock.date():
+        # Only under --force: otherwise a run during the session is protect-only and never gets here.
+        notes.append(f"WARNING: run at {clock:%H:%M} ET while the market is open - today's session still in "
+                     f"progress, so signals, limits and stops are priced off a partial day, and exits fill now, "
+                     f"not at the next open")
 
     day_pcfg = dict(pcfg)
     target_positions = pcfg["target_positions"]
-    regime_liquidate = False
+    regime_liquidate, regime_status = False, "off"
     if cfg["regime"]["enabled"]:
         try:
             spy = cached_bars(data, ["SPY"], 320, cfg, tag="spy")["close"]["SPY"].dropna()
@@ -154,12 +251,20 @@ def main() -> None:
             rp = regime_params(state, pcfg, cfg["regime"])
             target_positions, regime_liquidate = rp["target_positions"], rp["liquidate"]
             day_pcfg["max_position_pct"] = rp["max_position_pct"]
+            regime_status = state
             vix_txt = f"{reg['vix']:.1f}" if reg["vix"] is not None else "unavailable"
             notes.append(f"regime {reg['label']}: SPY {reg['spy']:.0f} vs {reg['spy_ma'] or 0:.0f} MA, VIX {vix_txt}; "
                          f"target positions {target_positions}, position cap {day_pcfg['max_position_pct']:.0%}"
                          + (" - FLAT: exiting everything" if regime_liquidate else ""))
         except Exception as e:
+            # Fail safe: without a reading, size as risk-off until the feed is back. Never liquidate on a failed
+            # feed, even with off_liquidate set - selling everything is a decision a data outage cannot make.
             log.warning("regime unavailable: %s", e)
+            rp = regime_params("off", pcfg, dict(cfg["regime"], off_liquidate=False))
+            target_positions, day_pcfg["max_position_pct"] = rp["target_positions"], rp["max_position_pct"]
+            regime_status = "unavailable"
+            notes.append(f"WARNING: regime gate unavailable ({type(e).__name__}) - fail-safe: risk-off target of "
+                         f"{target_positions} positions until the SPY/VIX feeds are back; nothing is sold for it")
 
     # The cap is enforced at entry only; a winner can drift through it. Say so every run until it is fixed -
     # the desk does not trim held positions itself (a partial sell would orphan the broker-side OCO).
@@ -186,7 +291,13 @@ def main() -> None:
             pos["high_close"] = max(float(pos.get("high_close") or pos["entry_price"]), c)
             new = trail_stop(float(pos["stop"]), pos["high_close"], float(a.iloc[-1]), ecfg)
             if new > float(pos["stop"]):
-                effective = broker.raise_stop(sym, new)
+                try:
+                    effective = broker.raise_stop(sym, new)
+                except Exception as e:
+                    log.warning("raise_stop %s failed: %s", sym, e)
+                    notes.append(f"{sym} stop NOT raised to {new:.2f}: the replace was rejected ({type(e).__name__}) "
+                                 f"- the previous stop is checked below")
+                    continue
                 if effective is None:
                     notes.append(f"{sym} stop NOT raised to {new:.2f}: no open stop order found at the broker - check manually")
                 else:
@@ -195,7 +306,7 @@ def main() -> None:
                     # Never record a level below what the broker is holding.
                     pos["stop"] = max(float(pos["stop"]), effective)
 
-    facts = {}
+    facts, pool, facts_failed = {}, [], False
     if cfg["facts"]["enabled"] and not cfg["facts"].get("social_enabled", True):
         notes.append("social crowding guard: disabled in config (no history yet) - not screening for pumps")
     if cfg["facts"]["enabled"]:
@@ -204,8 +315,14 @@ def main() -> None:
             fb = FactBuilder(key, secret, cfg, today, asset_lookup=getattr(trading, "get_asset", None))
             facts = fb.build(sorted(set(pool) | set(st["positions"])), panel["close"])
         except Exception as e:
+            # Fail closed, like the analyst: an unscreened candidate could be reporting tomorrow or mid-offering.
             log.warning("facts unavailable: %s", e)
-            notes.append("fact sheets unavailable -> candidates not screened for earnings/offerings")
+            facts_failed = True
+            notes.append(f"fact sheets unavailable ({type(e).__name__}) -> fail-safe: no new entries today "
+                         f"(candidates cannot be screened for earnings or offerings)")
+        if pool and facts and all((facts.get(s) or {}).get("earnings_lookup_failed") for s in pool):
+            notes.append("earnings calendar unavailable for every candidate (FINNHUB_API_KEY missing or Finnhub "
+                         "down) -> fail-safe: all blocked, no new entries today")
     blocked, tilt = {}, {}
     for s, f in facts.items():
         if s in st["positions"]:
@@ -241,16 +358,18 @@ def main() -> None:
         elif pre_earn and eid_td is not None and 0 <= eid_td <= pre_earn:
             # Overrides min_hold_days on purpose: the binary event is the reason to be flat.
             exits[sym] = f"pre-earnings exit ({eid_td} trading days to report)"
-        elif held >= ecfg["min_hold_days"]:
-            if sym not in snap.index:
+        else:
+            verdict = decay_exit(snap, sym, held, ecfg)
+            if verdict == "defer":
                 # No complete bar today (a trading halt, a feed gap). Absence from the snapshot says nothing
                 # about the ranking, so wait for data instead of selling into the reopening on a gap.
                 notes.append(f"{sym}: no complete bar today - signal-decay check deferred")
-            elif not bool(snap.loc[sym, "eligible"]) or snap.loc[sym, "rank"] > ecfg["signal_decay_rank"]:
+            elif verdict == "decay":
                 exits[sym] = "signal decay"
 
     held_after = [s for s in st["positions"] if s not in exits]
-    slots = target_positions - len(held_after) if decision.allow_entries and not stale else 0
+    may_add = decision.allow_entries and not stale and not facts_failed
+    slots = target_positions - len(held_after) if may_add else 0
     picks = select_entries(snap, panels["returns"], list(st["positions"]), slots, pcfg)
     equity = acct["equity"]
     cash_avail = min(acct["cash"], acct["non_marginable_buying_power"]) - equity * pcfg["cash_floor_pct"]
@@ -264,11 +383,11 @@ def main() -> None:
         if mult < 1.0:
             # One share is already the smallest expressible position; shrinking below it would drop the
             # name entirely, turning a risk-reduction rule into a silent exclusion.
-            sz["qty"] = max(1, int(sz["qty"] * mult))
+            sz["qty"] = shrink_qty(sz["qty"], mult)
             sz["notional"] = sz["qty"] * float(row["close"])
         cash_avail -= sz["notional"]
         entries.append({
-            "symbol": sym, "price": float(row["close"]), "limit": round(float(row["close"]) * 1.005, 2),
+            "symbol": sym, "price": float(row["close"]), "limit": entry_limit(float(row["close"])),
             "rank": int(row["rank"]), "momentum_6m": float(row["momentum"]), "return_20d": float(row["short"]),
             "atr_pct": float(row["atr_pct"]), **sz,
             "thesis": f"rank {int(row['rank'])}, 6m mom {row['momentum']:.0%}, 20d {row['short']:.0%}"
@@ -291,7 +410,7 @@ def main() -> None:
             notes.append(f"{len(entries) - n_review} entries beyond analyst review capacity dropped")
             entries = entries[:n_review]
         payload = {
-            "date": today.isoformat(), "mode": mode,
+            "date": today.isoformat(), "mode": "PAPER" + (" DRY-RUN" if args.dry_run else ""),
             "account": {"equity": equity, "cash": acct["cash"], "drawdown_from_hwm": round(decision.drawdown, 4),
                         "day_return": round(decision.daily_return, 4), "kill_switch_at": rcfg["max_drawdown_pct"]},
             "limits": {"max_positions": pcfg["max_positions"], "target_positions": target_positions,
@@ -323,7 +442,7 @@ def main() -> None:
             notes.append("analyst unavailable -> fail-safe: no new entries today")
         else:
             entries, extra, verdict_notes = apply_verdicts(analyst_out["verdicts"], st["positions"], entries,
-                                                           cfg["analyst"].get("reduce_factor", 0.75))
+                                                           cfg["analyst"]["reduce_factor"])
             exits.update(extra)
             notes += verdict_notes
             notes += [f"data concern: {c}" for c in analyst_out.get("data_concerns", [])]
@@ -338,7 +457,7 @@ def main() -> None:
     # sized like a fresh entry at today's price, capped by the position limit, sharing the trailed stop.
     # Holdings the analyst is removing or reducing never get added to.
     adds = []
-    if int(pcfg.get("pyramid_max_adds") or 0) > 0 and decision.allow_entries and not stale:
+    if int(pcfg.get("pyramid_max_adds") or 0) > 0 and may_add:
         for sym, pos in st["positions"].items():
             if not pos.get("filled") or sym in exits or pos.get("add_order_id") or pos.get("stop") is None or sym not in snap.index:
                 continue
@@ -354,36 +473,96 @@ def main() -> None:
             if q < 1:
                 continue
             cash_avail -= q * px
-            adds.append({"symbol": sym, "qty": q, "price": px, "limit": round(px * 1.005, 2), "stop": float(pos["stop"]),
+            adds.append({"symbol": sym, "qty": q, "price": px, "limit": entry_limit(px), "stop": float(pos["stop"]),
                          "notional": q * px, "add_n": int(pos.get("adds") or 0) + 1})
+    return {"exits": exits, "entries": entries, "adds": adds, "analyst_out": analyst_out,
+            "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
+            "regime": regime_status}
 
-    # Every position keeps a live broker-side stop. Bracket legs inherit the entry's DAY tif and die at the
-    # close of the day the entry fills, so from the next session on the only protection is what is re-placed
-    # here. A position already through its stop with nothing resting is closed outright.
+
+def protect(st: dict, broker, exits: dict, notes: list) -> None:
+    """Every position keeps a live broker-side stop. Bracket legs inherit the entry's DAY tif and die at the
+    close of the day the entry fills, so from the next session on the only protection is what is re-placed
+    here. A position already through its stop with nothing resting is closed outright. Anything that leaves
+    a holding without a stop is a MANUAL ACTION note, every run, until it is fixed."""
     for sym, pos in st["positions"].items():
-        if not pos.get("filled") or sym in exits or pos.get("stop") is None or pos.get("pending_exit_reason"):
+        if not pos.get("filled") or sym in exits or pos.get("pending_exit_reason"):
+            continue
+        if pos.get("stop") is None:
+            notes.append(f"MANUAL ACTION: {sym} {NO_STOP}: adopted from the broker with no stop on record - place "
+                         f"one at the broker or close it (the desk only time-exits it)")
             continue
         last = float(pos.get("last_price") or 0)
         if last and last <= float(pos["stop"]):
             exits[sym] = f"stop {pos['stop']:.2f} breached (no live broker order)"
             continue
-        legs = broker.live_exit_orders(sym)
-        if legs.get("error"):
-            notes.append(f"{sym} protection UNVERIFIED: broker order query failed - check manually")
-            continue
-        if legs["stop"] is None:
-            oid = broker.submit_exit_protection(sym, int(float(pos["qty"])), float(pos["stop"]), pos.get("target"))
-            notes.append(f"{sym} protective stop re-placed at {pos['stop']:.2f} (GTC)" + ("" if oid else " - FAILED"))
+        ensure_stop(broker, sym, pos, notes)
 
+
+def ensure_stop(broker, sym: str, pos: dict, notes: list) -> None:
+    """Re-place a GTC stop (OCO with the target) if the broker has none resting for this holding."""
+    legs = broker.live_exit_orders(sym)
+    if legs.get("error"):
+        notes.append(f"MANUAL ACTION: {sym} protection UNVERIFIED: the broker order query failed - check its stop "
+                     f"at the broker")
+        return
+    if legs["stop"] is not None:
+        check_coverage(sym, pos, legs, notes)
+        return
+    try:
+        broker.submit_exit_protection(sym, int(float(pos["qty"])), float(pos["stop"]), pos.get("target"))
+        notes.append(f"{sym} protective stop re-placed at {pos['stop']:.2f} (GTC)")
+    except Exception as e:
+        log.error("protective stop for %s rejected: %s", sym, e)
+        notes.append(f"MANUAL ACTION: {sym} {NO_STOP}: re-placing it at {pos['stop']:.2f} was rejected "
+                     f"({type(e).__name__}: {telemetry.redact(str(e))[:160]}) - place it at the broker")
+
+
+def check_coverage(sym: str, pos: dict, legs: dict, notes: list) -> None:
+    """A resting stop must cover exactly the shares held, less any sale already working. A manual trim leaves
+    it too large (when it fires it sells short); a manual add leaves the new shares bare. Existence alone
+    was all that was checked."""
+    covered = getattr(legs["stop"], "qty", None)
+    if covered is None:
+        return
+    held, covered = float(pos["qty"]), float(covered)
+    selling = float(getattr(legs.get("close"), "qty", 0) or 0)
+    if covered + selling < held:
+        notes.append(f"MANUAL ACTION: {sym} {NO_STOP} for {held - covered - selling:g} of {held:g} share(s): the "
+                     f"resting stop covers {covered:g} - resize it at the broker")
+    elif covered > held:
+        notes.append(f"MANUAL ACTION: {sym} protection MISMATCH: the resting stop is for {covered:g} shares but "
+                     f"{held:g} are held - when it fires it sells {covered - held:g} short; resize it at the broker")
+
+
+def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open) -> None:
+    """Exits, then entries, then adds. One rejected order never stops the rest, and state is saved after each
+    submitted entry so a run killed half way leaves state agreeing with the broker."""
+    ecfg, rcfg = cfg["exits"], cfg["risk"]
     for sym, reason in exits.items():
         pos = st["positions"][sym]
-        if not can_exit_today(pos, today, acct["daytrade_count"], rcfg):
+        if not can_exit_today(pos, today, acct["daytrade_count"], rcfg, session_open):
             notes.append(f"{sym} exit deferred a day (day-trade guard)")
             continue
-        broker.close(sym)
+        try:
+            broker.close(sym)
+        except Exception as e:
+            log.error("close %s failed: %s", sym, e)
+            notes.append(f"ORDER FAILED: {sym} exit ({reason}) was rejected ({type(e).__name__}: "
+                         f"{telemetry.redact(str(e))[:160]}) - retried next run")
+            # close() cancels the stops before selling, so a rejected sale can leave the holding bare.
+            if pos.get("stop") is not None:
+                ensure_stop(broker, sym, pos, notes)
+            continue
         pos["pending_exit_reason"] = reason
     for e in entries:
-        oid = broker.submit_bracket(e["symbol"], e["qty"], e["limit"], e["stop"], e.get("target"))
+        try:
+            oid = broker.submit_bracket(e["symbol"], e["qty"], e["limit"], e["stop"], e.get("target"))
+        except Exception as ex:
+            log.error("entry %s failed: %s", e["symbol"], ex)
+            notes.append(f"ORDER FAILED: BUY {e['symbol']} x{e['qty']} was rejected ({type(ex).__name__}: "
+                         f"{telemetry.redact(str(ex))[:160]}) - nothing was bought")
+            continue
         if not args.dry_run:
             st["positions"][e["symbol"]] = {
                 "entry_date": today.isoformat(), "entry_price": e["price"], "qty": e["qty"], "stop": e["stop"],
@@ -392,30 +571,20 @@ def main() -> None:
                 "high_close": e["price"], "adds": 0, "last_add_price": e["price"],
                 "initial_risk_per_share": round(e["price"] - e["stop"], 4),
             }
+            save_state(st)
     for a in adds:
-        oid = broker.submit_bracket(a["symbol"], a["qty"], a["limit"], a["stop"], None)
+        try:
+            oid = broker.submit_bracket(a["symbol"], a["qty"], a["limit"], a["stop"], None)
+        except Exception as ex:
+            log.error("add %s failed: %s", a["symbol"], ex)
+            notes.append(f"ORDER FAILED: ADD {a['symbol']} x{a['qty']} was rejected ({type(ex).__name__})")
+            continue
         if not args.dry_run:
             st["positions"][a["symbol"]].update(add_order_id=oid, add_date=today.isoformat())
-
-    if not args.dry_run:
-        st["last_run"] = today.isoformat()
-        save_state(st)
-    notes.sort(key=lambda n: not n.startswith("MANUAL ACTION"))
-    brief = render_brief(mode, today, acct, decision, st, exits, entries, notes, "", cfg, adds)
-    if analyst_out and analyst_out.get("brief"):
-        brief += "\n\nANALYST\n" + analyst_out["brief"]
-    write_brief(brief, today)
-    send(brief, cfg)
-    count = lambda text: sum(text in n for n in notes)
-    telemetry.note(entries=len(entries), exits=len(exits), adds=len(adds), notes=len(notes), stale=stale,
-                   analyst=analyst_status, positions=len(st["positions"]), equity=round(acct["equity"], 2),
-                   manual_actions=count("MANUAL ACTION"), cap_breaches=count("% cap - sell"),
-                   protection_unverified=count("protection UNVERIFIED"), protection_replaced=count("protective stop re-placed"),
-                   stop_not_raised=count("stop NOT raised"), decay_deferred=count("signal-decay check deferred"),
-                   data_concerns=count("data concern:"))
+            save_state(st)
 
 
-def render_brief(mode, today, acct, decision, st, exits, entries, notes, headline, cfg, adds=None) -> str:
+def render_brief(mode, today, acct, decision, st, exits, entries, notes, headline, cfg, adds=None, target=None) -> str:
     pcfg, ecfg, rcfg = cfg["portfolio"], cfg["exits"], cfg["risk"]
     eq = acct["equity"]
     lines = [f"DESK BRIEF {today.isoformat()} [{mode}]"]
@@ -427,13 +596,15 @@ def render_brief(mode, today, acct, decision, st, exits, entries, notes, headlin
         f"from all-time high ${st.get('all_time_hwm') or eq:,.0f}: {decision.cumulative_drawdown:.1%} "
         f"(floor {rcfg.get('max_cumulative_drawdown_pct', 0):.0%}) | cash ${acct['cash']:,.0f} ({acct['cash'] / eq:.0%})"
     )
-    lines.append(f"Positions {len(st['positions'])}/{pcfg['max_positions']} (target {pcfg['target_positions']})")
+    # The day's target (the regime gate halves it in risk-off), not the configured one.
+    lines.append(f"Positions {len(st['positions'])}/{pcfg['max_positions']} "
+                 f"(target {target if target is not None else pcfg['target_positions']})")
     for sym, p in sorted(st["positions"].items()):
         held = (today - date.fromisoformat(p["entry_date"])).days
         last = p.get("last_price") or p["entry_price"]
         pnl = last / p["entry_price"] - 1 if p["entry_price"] else 0
         flag = f"  -> EXIT: {exits[sym]}" if sym in exits else (f"  -> {p['pending_exit_reason']}" if p.get("pending_exit_reason") else "")
-        stop = f"{p['stop']:.2f}" if p.get("stop") else "-"
+        stop = f"{p['stop']:.2f}" if p.get("stop") else "NONE"
         tgt = f"{p['target']:.2f}" if p.get("target") else ("trail" if p.get("stop") else "-")
         adds_s = f" +{p['adds']}" if p.get("adds") else ""
         lines.append(f"  {sym:<6} {p['qty']:>5.0f}{adds_s} @ {p['entry_price']:.2f} -> {last:.2f} ({pnl:+.1%}) day {held}/{ecfg['max_hold_days']} stop {stop} tgt {tgt}{flag}")

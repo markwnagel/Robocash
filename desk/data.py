@@ -6,6 +6,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from alpaca.common.exceptions import APIError
@@ -17,9 +18,24 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest
 
+from .state import atomic_pickle, atomic_write_text
+
 log = logging.getLogger("desk.data")
 CHUNK = 200
 FIELDS = ["open", "high", "low", "close", "volume"]
+ET = ZoneInfo("America/New_York")
+SESSION_DONE = (16, 20)     # ET: the close plus the free feed's 15-minute delay and a margin
+
+
+def last_close_cutoff(now: datetime | None = None) -> datetime:
+    """The latest weekday 16:20 ET at or before `now`. Bars fetched after it include the most recent
+    completed session; bars fetched before it can hold a session still in progress. (Holidays count as
+    sessions here, which only costs a refetch.)"""
+    now = (now or datetime.now(timezone.utc)).astimezone(ET)
+    t = now.replace(hour=SESSION_DONE[0], minute=SESSION_DONE[1], second=0, microsecond=0)
+    while t > now or t.weekday() >= 5:
+        t = (t - timedelta(days=1)).replace(hour=SESSION_DONE[0], minute=SESSION_DONE[1])
+    return t
 
 
 def list_candidate_assets(trading: TradingClient, ucfg: dict) -> list:
@@ -42,11 +58,12 @@ def list_candidate_assets(trading: TradingClient, ucfg: dict) -> list:
 
 
 def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
-                     feed: str = "sip", end: datetime | None = None) -> dict:
-    """Returns {'open','high','low','close','volume'} -> DataFrame[date x symbol]."""
+                     feed: str = "sip", end: datetime | None = None, start: datetime | None = None) -> dict:
+    """Returns {'open','high','low','close','volume'} -> DataFrame[date x symbol]. `start`, when given,
+    replaces the window implied by `days`."""
     # Free-tier SIP requires the request window to end >= 15 minutes in the past.
     end = end or (datetime.now(timezone.utc) - timedelta(minutes=16))
-    start = end - timedelta(days=int(days * 1.45) + 10)
+    start = start or end - timedelta(days=int(days * 1.45) + 10)
     feed_state = {"feed": DataFeed(feed)}
 
     def pull(syms: list) -> list:
@@ -75,14 +92,16 @@ def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
         return set().union(*(set(f.loc[f["close"].notna(), "symbol"]) for f in frames)) if frames else set()
 
     frames = pull(symbols)
-    missing = [s for s in symbols if s not in with_data(frames)]
+    have = with_data(frames)          # once: rebuilding it per symbol scans every row N times
+    missing = [s for s in symbols if s not in have]
     if missing and frames:
         # The feed occasionally returns nothing for one name in an otherwise good response (TEVA,
         # 2026-09-24: every day blank). Nothing downstream can tell "no data" from "not ranked", so live
         # the desk would sell a holding as signal decay, and a backtest silently trades a different universe.
         log.warning("no bars for %d symbol(s), retrying once: %s", len(missing), ", ".join(missing[:10]))
         frames += pull(missing)
-        missing = [s for s in symbols if s not in with_data(frames)]
+        have = with_data(frames)
+        missing = [s for s in symbols if s not in have]
         if missing:
             log.warning("STILL no bars for %d symbol(s) - absent from this panel: %s",
                         len(missing), ", ".join(missing[:20]))
@@ -90,10 +109,9 @@ def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
         raise RuntimeError("no bar data returned")
     df = pd.concat(frames, ignore_index=True)
     df["date"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("America/New_York").dt.normalize().dt.tz_localize(None)
-    panel = {}
-    for f in FIELDS:
-        panel[f] = df.pivot_table(index="date", columns="symbol", values=f, aggfunc="last").sort_index()
-    return panel
+    # Last bar per (date, symbol), as pivot_table(aggfunc="last") did, at a fraction of the cost on long histories.
+    df = df.drop_duplicates(["date", "symbol"], keep="last")
+    return {f: df.pivot(index="date", columns="symbol", values=f).sort_index() for f in FIELDS}
 
 
 def cached_bars(data, symbols, days, cfg, tag="daily", asof=None) -> dict:
@@ -105,10 +123,13 @@ def cached_bars(data, symbols, days, cfg, tag="daily", asof=None) -> dict:
     # panel drops a held name out of the snapshot, where the exit logic reads it as signal decay and sells.
     digest = hashlib.sha1(",".join(sorted(symbols)).encode()).hexdigest()[:10]
     key = cache_dir / f"bars_{tag}_{asof.isoformat()}_{days}_{len(symbols)}_{digest}.pkl"
-    if key.exists():
+    # Same-day reuse only if fetched after the latest close. A dry run at 11:00 ET would otherwise hand the
+    # 16:45 live run a panel whose last bar is the morning's partial session; one fetched before the open
+    # would hand it no bar for today at all, and the stale guard would skip the day's entries.
+    if key.exists() and key.stat().st_mtime >= last_close_cutoff().timestamp():
         return pd.read_pickle(key)
     panel = fetch_daily_bars(data, symbols, days, cfg["data"]["feed"])
-    pd.to_pickle(panel, key)
+    atomic_pickle(panel, key)
     prune_bar_cache(cache_dir, int(cfg["data"].get("cache_retention_days", 2)))
     return panel
 
@@ -151,7 +172,6 @@ def build_universe(trading, data, cfg, force=False, cache_name="universe.json") 
     last = close.ffill().iloc[-1]
     ok = dollar_vol[(dollar_vol >= ucfg["min_avg_dollar_volume"]) & (last >= ucfg["min_price"])]
     symbols = list(ok.sort_values(ascending=False).index[: ucfg["max_symbols"]])
-    cache.parent.mkdir(exist_ok=True)
-    cache.write_text(json.dumps({"date": date.today().isoformat(), "symbols": symbols}))
+    atomic_write_text(cache, json.dumps({"date": date.today().isoformat(), "symbols": symbols}))
     log.info("universe: %d symbols", len(symbols))
     return symbols

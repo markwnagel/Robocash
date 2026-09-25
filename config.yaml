@@ -1,6 +1,10 @@
 # Backtest figures dated 2026-09-12 in the comments below were measured on a universe that no longer
 # exists and do not reproduce (that baseline, +247%, re-runs at +143.8% on the frozen snapshot). Treat
 # them as directional; see README "Reproducible backtests". Figures dated 2026-09-24 are reproducible.
+# All backtest figures in these comments come from the survivor-list universe (today's 800 names). The
+# point-in-time study (robustness.py, 2018-2026, delisted names included) reverses several of them - e.g.
+# 15 target positions and regime.off_liquidate both beat this config there. See README "Point-in-time
+# robustness study" before changing a setting on the strength of a comment below.
 account:
   paper: true
   starting_capital: 10000
@@ -200,3 +204,9 @@ monitor:                       # agent reliability monitor (monitor.py): runs we
       owner: mark@markwnagel.com
       expected_output: one run per week (runs when the Mac next wakes after Saturday); at most 3 proposed changes.
       slos: {task_success_rate: "one run every 8 days or fewer", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 6}
+
+backtest:
+  prior_untracked_trials: 1    # the $5M-volume universe variant (2026-09-12), not re-run: it needs its own 1500-name
+                               # price download. The other 13 variants from that day were re-run on the frozen
+                               # universe on 2026-09-24 and are in state/history/trials.jsonl. Every variant counts
+                               # toward the Deflated Sharpe's N: a result picked from many tries must clear a higher bar.

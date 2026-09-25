@@ -51,9 +51,17 @@ def evaluate(equity: float, last_equity: float, state: dict, rcfg: dict) -> Risk
     return d
 
 
-def can_exit_today(pos: dict, today: date, daytrade_count: int, rcfg: dict) -> bool:
-    """Avoid same-day round trips that would count toward the pattern-day-trader limit."""
-    if pos.get("entry_date") != today.isoformat():
+def can_exit_today(pos: dict, today: date, daytrade_count: int, rcfg: dict, session_open: bool = False) -> bool:
+    """Avoid same-day round trips that would count toward the pattern-day-trader limit.
+
+    entry_date is the day the entry was STAGED, the evening before it fills, so on its own it never matches
+    a position bought today. After the close (the scheduled run) that is harmless: the sale executes next
+    session and cannot complete a round trip. During the session (a run launched late while the market is
+    open) the sale fills at once, so a position whose fill was first seen today (filled_date) counts too."""
+    same_day = pos.get("entry_date") == today.isoformat()
+    if session_open and pos.get("filled_date") == today.isoformat():
+        same_day = True
+    if not same_day:
         return True
     return daytrade_count < rcfg["max_daytrades_per_5d"]
 

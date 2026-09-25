@@ -22,6 +22,7 @@ from alpaca.data.requests import NewsRequest, OptionChainRequest
 
 from . import telemetry
 from .edgar import Edgar, offering_filings, recent_8k_items, shelf_filings
+from .state import atomic_write_text
 
 log = logging.getLogger("desk.facts")
 OCC_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
@@ -234,6 +235,7 @@ class FactBuilder:
         self.news = NewsClient(key, secret)
         self.options = OptionHistoricalDataClient(key, secret)
         self.asset_lookup = asset_lookup
+        self._assets: dict = {}          # one broker lookup per symbol, shared by _company and _asset
         self.cache_dir = Path(cfg["_root"]) / cfg["data"]["cache_dir"]
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file = self.cache_dir / f"facts_{today.isoformat()}.json"
@@ -274,9 +276,9 @@ class FactBuilder:
             })
         # A sheet built on a failed earnings lookup is not cached either, or a same-day re-run would reuse it.
         keep = {k: v for k, v in cached.items() if not v.get("earnings_lookup_failed")}
-        self.cache_file.write_text(json.dumps(keep, indent=1, default=str))
-        self.social_file.parent.mkdir(exist_ok=True)
-        self.social_file.write_text(json.dumps(social_hist))
+        atomic_write_text(self.cache_file, json.dumps(keep, indent=1, default=str))
+        if self.fcfg.get("social_enabled", True):
+            atomic_write_text(self.social_file, json.dumps(social_hist))
         return {s: cached[s] for s in symbols}
 
     def _news(self, s: str, headlines: dict) -> dict:
@@ -303,17 +305,21 @@ class FactBuilder:
         return {"news_24h": sum(1 for h in hl if h["age_h"] <= 24), "news_7d": len(hl), "headlines": hl[:10],
                 "headlines_dropped_unrelated": dropped}
 
-    def _company(self, s: str) -> str | None:
+    def _asset_obj(self, s: str):
+        """The broker's asset record, fetched once per symbol (None if unavailable)."""
         if not self.asset_lookup:
             return None
-        if not hasattr(self, "_names"):
-            self._names = {}
-        if s not in self._names:
+        if s not in self._assets:
             try:
-                self._names[s] = self.asset_lookup(s).name
-            except Exception:
-                self._names[s] = None
-        return self._names[s]
+                self._assets[s] = self.asset_lookup(s)
+            except Exception as e:
+                log.info("asset %s unavailable: %s", s, e)
+                self._assets[s] = None
+        return self._assets[s]
+
+    def _company(self, s: str) -> str | None:
+        a = self._asset_obj(s)
+        return getattr(a, "name", None) if a is not None else None
 
     def _earnings_calendar(self, symbols: list) -> dict:
         """One query per symbol. The bulk date-range endpoint silently truncates at 1500 rows and returns
@@ -321,7 +327,10 @@ class FactBuilder:
         looks earnings-free - a failure that reads as success."""
         key = os.environ.get("FINNHUB_API_KEY", "")
         if not key:
-            log.warning("FINNHUB_API_KEY not set: earnings dates unavailable (analyst check only)")
+            # Unknown, not "no report": every candidate is blocked, as after a failed lookup. Returning an
+            # empty calendar used to read as "earnings-free" and turned the hard block off.
+            log.warning("FINNHUB_API_KEY not set: earnings dates unknown - candidates blocked (fail-safe)")
+            self.earnings_failed.update(symbols)
             return {}
         p = self.cache_dir / f"earnings_{self.today.isoformat()}.json"
         cal = json.loads(p.read_text()) if p.exists() else {}
@@ -343,7 +352,7 @@ class FactBuilder:
             if i % 50 == 49:
                 time.sleep(1.0)  # free tier allows 60 calls/minute
         if fetched:
-            p.write_text(json.dumps(cal))
+            atomic_write_text(p, json.dumps(cal))
         return cal
 
     def _earnings(self, s: str, cal: dict) -> dict:
@@ -433,13 +442,10 @@ class FactBuilder:
         return out
 
     def _asset(self, s: str) -> dict:
-        if not self.asset_lookup:
+        a = self._asset_obj(s)
+        if a is None:
             return {}
-        try:
-            a = self.asset_lookup(s)
-            return {"easy_to_borrow": bool(a.easy_to_borrow), "shortable": bool(a.shortable)}
-        except Exception:
-            return {}
+        return {"easy_to_borrow": bool(getattr(a, "easy_to_borrow", False)), "shortable": bool(getattr(a, "shortable", False))}
 
 
 def compact(f: dict) -> dict:

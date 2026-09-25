@@ -50,11 +50,20 @@ class Broker:
         cal = self.t.get_calendar(GetCalendarRequest(start=day, end=day))
         return any(c.date == day for c in cal)
 
-    def cancel_symbol_orders(self, symbol: str) -> int:
+    def market_open(self) -> bool:
+        """Whether the regular session is open right now. Unknown reads as open: the callers use it to be
+        more careful (day-trade guard, partial-bar warning), never less."""
+        try:
+            return bool(self.t.get_clock().is_open)
+        except Exception as e:
+            log.warning("market clock unavailable, assuming the session is open: %s", e)
+            return True
+
+    def cancel_symbol_orders(self, symbol: str, side: OrderSide | None = None) -> int:
         orders = self.t.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]))
         n = 0
         for o in orders:
-            if o.symbol != symbol:
+            if o.symbol != symbol or (side is not None and o.side != side):
                 continue
             if self.dry_run:
                 log.info("[dry] cancel %s %s", symbol, o.id)
@@ -96,7 +105,8 @@ class Broker:
         return str(o.id)
 
     def live_exit_orders(self, symbol: str) -> dict:
-        """{'stop': order|None, 'target': order|None} for orders that can still fire.
+        """{'stop', 'target', 'close'}: the sell orders that can still fire (order or None each). 'close' is a
+        working market sell - a close sent earlier that has not filled yet.
         Status OPEN does NOT include 'held', which is where a resting stop leg sits, so query ALL."""
         try:
             orders = self.t.get_orders(GetOrdersRequest(
@@ -104,11 +114,12 @@ class Broker:
                 after=datetime.now() - timedelta(days=LOOKBACK_DAYS)))
         except Exception as e:
             log.warning("live_exit_orders %s: %s", symbol, e)
-            return {"stop": None, "target": None, "error": True}
+            return {"stop": None, "target": None, "close": None, "error": True}
         live = [o for o in orders if o.symbol == symbol and o.side == OrderSide.SELL
                 and o.status.value not in DEAD_ORDER_STATUSES and o.status.value != "filled"]
         return {"stop": next((o for o in live if o.stop_price), None),
-                "target": next((o for o in live if o.limit_price and not o.stop_price), None), "error": False}
+                "target": next((o for o in live if o.limit_price and not o.stop_price), None),
+                "close": next((o for o in live if not o.limit_price and not o.stop_price), None), "error": False}
 
     def submit_exit_protection(self, symbol: str, qty: int, stop: float, target: float | None) -> str:
         """A GTC stop (paired with a target as OCO when there is one) that survives the session.
@@ -146,9 +157,11 @@ class Broker:
         return new_stop
 
     def order_status(self, order_id: str) -> str | None:
+        """None when the order cannot be read; the caller then waits two days before giving up on it."""
         try:
             return self.t.get_order_by_id(order_id).status.value
-        except Exception:
+        except Exception as e:
+            log.warning("order %s status unavailable: %s", order_id, e)
             return None
 
     def order_fill(self, order_id: str) -> tuple:
@@ -156,7 +169,8 @@ class Broker:
         try:
             o = self.t.get_order_by_id(order_id)
             return o.status.value, (float(o.filled_avg_price) if o.filled_avg_price else None)
-        except Exception:
+        except Exception as e:
+            log.warning("order %s fill unavailable: %s", order_id, e)
             return None, None
 
     def last_sell_fill(self, symbol: str, since: date) -> float | None:
@@ -179,9 +193,19 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
     for sym in list(st.keys()):
         pos = st[sym]
         if sym in live:
+            if not pos.get("filled"):
+                # First sight of the fill. entry_date is when the order was staged (the evening before), so
+                # the day-trade guard needs this to know which positions were bought today.
+                pos["filled_date"] = today.isoformat()
             pos["filled"] = True
             pos["entry_price"] = live[sym]["avg_entry_price"]
             pos["qty"] = live[sym]["qty"]
+            if pos.get("pending_exit_reason") and broker.live_exit_orders(sym).get("close") is not None:
+                # The close sent earlier is still working (a second run the same evening, or a sale queued
+                # for the open): the position is exiting. Re-evaluating it would re-place a stop beside the
+                # queued sale, and whichever fills second would sell shares the account no longer has.
+                notes.append(f"{sym} close still working at the broker ({pos['pending_exit_reason']})")
+                continue
             # The position was told to close on an earlier run and is still here, so that close did not
             # complete (unfilled market sell, halt, partial fill, rejection). The flag has to go: while it
             # is set the position is skipped by the exit, trailing-stop AND stop-re-placement loops, so it
@@ -203,11 +227,26 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
             continue
         entry = date.fromisoformat(pos["entry_date"])
         if pos.get("filled"):
-            exit_price = broker.last_sell_fill(sym, entry) if not broker.dry_run else None
+            exit_price = None
+            if not broker.dry_run:
+                try:
+                    exit_price = broker.last_sell_fill(sym, entry)
+                except Exception as e:
+                    log.warning("last sell fill %s unavailable, logging the last mark: %s", sym, e)
             exit_price = exit_price or pos.get("last_price") or pos["entry_price"]
             if not broker.dry_run:
                 _log_close(pos, sym, exit_price, today, pos.get("pending_exit_reason", "bracket/stop/target"))
             notes.append(f"{sym} closed at ~{exit_price:.2f} ({pos.get('pending_exit_reason', 'bracket')})")
+            # A sell order left resting on a name no longer held (a stop beside a manual close, the other
+            # half of an OCO the broker did not cancel) would open a SHORT position when it fires.
+            try:
+                n = broker.cancel_symbol_orders(sym, side=OrderSide.SELL)
+                if n:
+                    notes.append(f"{sym}: {n} leftover sell order(s) cancelled - nothing is held to sell")
+            except Exception as e:
+                log.warning("leftover orders for %s not cancelled: %s", sym, e)
+                notes.append(f"MANUAL ACTION: {sym} is closed but its leftover sell orders could not be checked "
+                             f"({type(e).__name__}) - cancel any at the broker, or a stop could open a short")
             del st[sym]
         else:
             # An unfilled DAY order that has expired must free its slot the same evening, not two days later.

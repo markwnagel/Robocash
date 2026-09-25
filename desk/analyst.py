@@ -209,6 +209,10 @@ def _parse(text: str) -> dict | None:
 def apply_verdicts(verdicts: list, holdings: dict, entries: list, reduce_factor: float = 0.75) -> tuple:
     """Vetoes can only remove or shrink. Returns (entries, extra_exits{sym: reason}, notes).
 
+    An entry needs a verdict to be bought: one the analyst skipped, or answered with anything but KEEP, REMOVE
+    or REDUCE, has not been reviewed, and nothing is bought unreviewed. (It used to be kept, so a truncated
+    answer let through exactly the names the analyst never looked at.)
+
     reduce_factor scales a REDUCEd entry's shares. It is clamped to at most 1.0 so no config value can
     turn a veto into an enlargement - the governing rule is that the LLM roles only ever cut risk.
 
@@ -218,11 +222,14 @@ def apply_verdicts(verdicts: list, holdings: dict, entries: list, reduce_factor:
     a veto that silently does nothing is worse than one that is visibly deferred to the owner.
     """
     by_sym = {e["symbol"]: e for e in entries}
-    extra_exits, notes = {}, []
+    extra_exits, notes, reviewed = {}, [], set()
     factor = min(1.0, max(0.0, float(reduce_factor)))
     for v in verdicts:
         sym = str(v.get("symbol", "")).upper()
-        action = str(v.get("action", "KEEP")).upper()
+        action = str(v.get("action", "")).upper()
+        if action not in ("KEEP", "REMOVE", "REDUCE"):
+            continue
+        reviewed.add(sym)
         reason = f"analyst {action}: {v.get('reason', '')}"
         if action == "REMOVE":
             if sym in by_sym:
@@ -242,4 +249,9 @@ def apply_verdicts(verdicts: list, holdings: dict, entries: list, reduce_factor:
                 notes.append(f"MANUAL ACTION: {sym} flagged REDUCE by the analyst but is already held - not trimmed "
                              f"automatically (would orphan the broker-side stop); review manually: "
                              f"{v.get('reason', '')}")
+    unreviewed = [s for s in by_sym if s.upper() not in reviewed]
+    if unreviewed:
+        for s in unreviewed:
+            del by_sym[s]
+        notes.append(f"analyst gave no verdict for {', '.join(unreviewed)} -> not bought (nothing is bought unreviewed)")
     return [e for e in entries if e["symbol"] in by_sym], extra_exits, notes

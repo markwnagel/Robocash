@@ -122,6 +122,7 @@ def role_signals(events: list) -> dict:
             "cost_usd": robust(costs), "cost_total_usd": round(sum(x for x in costs if x), 4),
             "cost_unknown_calls": sum(1 for x in costs if x is None),
             "web_searches": sum(x.get("web_searches") or 0 for x in c),
+            "web_search_usd_total": round(sum(x.get("web_search_usd") or 0 for x in c), 4),
             "max_turns": max((x.get("turns") or 0 for x in c), default=0),
             "outputs": len(o), "no_answer": sum(1 for x in o if x.get("returned") is None),
             "coverage": round(ret / req, 3) if req else None,
@@ -221,9 +222,11 @@ def compare_roles(window: dict, base: dict) -> dict:
     return out
 
 
-def hard_alarms(runs: dict, jobs: dict, trading_days: set | None) -> list:
-    """Conditions that escalate whether or not the model is reachable: the desk is the job that maintains
-    exits and protective stops, so a missed, crashed or hung desk run is SEV1 on its own."""
+def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list | None = None) -> list:
+    """Conditions that escalate whether or not the model is reachable. The desk is the job that maintains
+    exits and protective stops, so a missed, crashed or hung desk run is SEV1 on its own; so is a holding
+    the desk reported without a broker-side stop, a kill-switch halt, and a daily email that did not go out.
+    `events` are the window's telemetry, for the outcome fields each run_end carries."""
     alarms = []
     desk = runs.get("desk", {})
     for t in desk.get("missed", []):
@@ -231,8 +234,9 @@ def hard_alarms(runs: dict, jobs: dict, trading_days: set | None) -> list:
             alarms.append({"key": f"desk-missed-{t.date()}", "severity": "SEV1",
                            "title": f"Desk job did not run for its {t:%a %Y-%m-%d %H:%M} slot",
                            "detail": "No run_start near the scheduled time. Exits, the kill switch and stop "
-                                     "re-placement did not run that day (broker-side stops still stand). "
-                                     "Likely cause: the Mac was asleep or off."})
+                                     "re-placement did not run that day. Stops placed on earlier days still stand "
+                                     "at the broker, but a position whose entry filled that day has none - its "
+                                     "bracket legs expired at the close. Likely cause: the Mac was asleep or off."})
     for r in jobs.get("desk", {}).get("errors", []):
         alarms.append({"key": f"desk-error-{r['run_id']}", "severity": "SEV1",
                        "title": "Desk job crashed", "detail": f"run {r['run_id']} at {r['ts']}: {r['error']}"})
@@ -241,6 +245,38 @@ def hard_alarms(runs: dict, jobs: dict, trading_days: set | None) -> list:
                        "title": "Desk job started and never finished",
                        "detail": f"run {r['run_id']} started {r['started']} with no run_end: killed, hung, or the "
                                  f"machine slept mid-run. Orders may be half-placed - check the broker."})
+    for t in runs.get("report", {}).get("missed", []):
+        if trading_days is None or t.date() in trading_days:
+            alarms.append({"key": f"report-missed-{t.date()}", "severity": "SEV1",
+                           "title": f"Daily report did not run for its {t:%a %Y-%m-%d %H:%M} slot",
+                           "detail": "No email that day: its notes, manual actions and health summary were not sent."})
+    for r in jobs.get("report", {}).get("errors", []):
+        alarms.append({"key": f"report-error-{r['run_id']}", "severity": "SEV1", "title": "Daily report crashed",
+                       "detail": f"run {r['run_id']} at {r['ts']}: {r['error']}. No email went out."})
+    ends = [e for e in events or [] if e.get("event") == "run_end"]
+    for e in ends:
+        if e.get("job") == "desk":
+            bare = (int(e.get("unprotected") or 0) + int(e.get("protection_unverified") or 0)
+                    + int(e.get("protection_mismatch") or 0))
+            if bare:
+                alarms.append({"key": f"desk-unprotected-{str(e['ts'])[:10]}", "severity": "SEV1",
+                               "title": f"{bare} holding(s) without a verified broker-side stop",
+                               "detail": f"desk run {e.get('run_id')} at {e['ts']} reported {e.get('unprotected') or 0} "
+                                         f"holding(s) with no stop (or not for every share), "
+                                         f"{e.get('protection_unverified') or 0} it could not verify and "
+                                         f"{e.get('protection_mismatch') or 0} whose stop is larger than the position. "
+                                         f"The brief's MANUAL ACTION notes name them; fix the stops at the broker."})
+            if e.get("status") == "halted":
+                alarms.append({"key": f"desk-halted-{e.get('halt_date') or str(e['ts'])[:10]}", "severity": "SEV1",
+                               "title": "Kill switch halted trading",
+                               "detail": f"{e.get('reason')}. Nothing trades until --resume"
+                                         f"{' --reset-hwm' if e.get('hard') else ''}; "
+                                         f"{e.get('open_positions', 0)} position(s) still open at that run."})
+        elif e.get("job") == "report" and e.get("email") == "failed":
+            alarms.append({"key": f"report-email-{e.get('run_id')}", "severity": "SEV1",
+                           "title": "Daily email failed to send",
+                           "detail": f"run {e.get('run_id')} at {e['ts']}: {e.get('email_detail')}. The report is in "
+                                     f"state/reports/; the next email will carry the changes this one missed."})
     return alarms
 
 

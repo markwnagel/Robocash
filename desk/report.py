@@ -17,7 +17,8 @@ import pandas as pd
 
 log = logging.getLogger("desk.report")
 
-TRACKED_CODE = ["run_daily.py", "backtest.py", "audit.py", "report_daily.py"]
+# Everything that decides a trade or writes what the owner reads, plus the monitor's instructions.
+TRACKED_CODE = ["run_daily.py", "backtest.py", "audit.py", "report_daily.py", "monitor.py", "agent-monitor-prompt.md"]
 
 
 def _asof(s: pd.Series, when) -> float | None:
@@ -292,6 +293,42 @@ def plain_summaries(moves: list, cfg: dict) -> dict:
     return out
 
 
+# Google Finance quote pages are TICKER:EXCHANGE - a bare ticker does not resolve reliably. Only codes checked
+# against live pages are mapped (2026-09-24: UMC:NYSE, AMD:NASDAQ, SPY:NYSEARCA); anything else gets no link.
+GOOGLE_EXCHANGE = {"NYSE": "NYSE", "NASDAQ": "NASDAQ", "ARCA": "NYSEARCA", "NYSEARCA": "NYSEARCA"}
+
+
+def quote_url(symbol: str, exchange: str | None) -> str | None:
+    code = GOOGLE_EXCHANGE.get(str(exchange or "").upper())
+    if not code or not re.fullmatch(r"[A-Z]{1,5}", str(symbol)):
+        return None
+    return f"https://www.google.com/finance/quote/{symbol}:{code}"
+
+
+def holdings_at_close(positions: list, closes: pd.DataFrame | None, cash: float) -> dict:
+    """Every holding marked at the official daily close, not the live after-hours print. A name whose bar
+    is missing falls back to the broker's last price and is flagged, so a stale mark is never silent."""
+    rows = []
+    for p in positions:
+        s = closes[p["symbol"]].dropna() if closes is not None and p["symbol"] in closes.columns else pd.Series(dtype=float)
+        close = float(s.iloc[-1]) if len(s) else float(p["price"])
+        prev = float(s.iloc[-2]) if len(s) > 1 else None
+        qty, entry = float(p["qty"]), float(p["entry_price"])
+        rows.append({"symbol": p["symbol"], "qty": qty, "close": close, "value": qty * close,
+                     "day_pct": close / prev - 1 if prev else None, "entry_price": entry,
+                     "pnl": (close - entry) * qty, "pnl_pct": close / entry - 1 if entry else None,
+                     "stop": p.get("stop"), "entry_date": p.get("entry_date"),
+                     "bar_date": s.index[-1].date() if len(s) else None, "live_mark": not len(s)})
+    invested = sum(r["value"] for r in rows)
+    equity = cash + invested
+    for r in rows:
+        r["weight"] = r["value"] / equity if equity else None
+    rows.sort(key=lambda r: -r["value"])
+    dates = [r["bar_date"] for r in rows if r["bar_date"]]
+    return {"rows": rows, "asof": max(dates) if dates else None, "invested": invested, "cash": cash,
+            "equity": equity, "pnl": sum(r["pnl"] for r in rows)}
+
+
 def _pct(x) -> str:
     return "n/a" if x is None else f"{x:+.2%}"
 
@@ -328,6 +365,24 @@ def build_report(ctx: dict) -> str:
             L += _wrap(f"- {trim_text(m, max_sentences=2, max_chars=300)}", indent="  ")
         L.append("")
 
+    ev = ctx.get("evidence")
+    if ev and ev.get("days"):
+        ref = ev.get("reference")
+        L.append("LIVE VS BACKTEST")
+        if ref:
+            vol = f"{ev['vol']:.1%}" if ev["vol"] is not None else "n/a"
+            L.append(f"  20-day volatility   {vol:>7}   backtest range {ref['vol_p05']:.0%}-{ref['vol_p95']:.0%}"
+                     f" (median {ref['vol_p50']:.0%})   {ev['vol_status']}")
+            L.append(f"  drawdown from peak  {ev['dd_now']:>7.1%}   backtest worst {ref['max_dd']:.1%}   {ev['dd_status']}")
+            L.append(f"  worst since start   {ev['dd_max']:>7.1%}   over {ev['days']} trading days")
+            if ev.get("stale_reference"):
+                L.append("  ! reference is from an older config - rerun the backtest without overrides to refresh it")
+        else:
+            L.append(f"  {ev['vol_status']}: run backtest.py once without overrides to create it")
+        if ctx.get("research"):
+            L.append(f"  research: {ctx['research']}")
+        L.append("")
+
     L.append("RESULTS TODAY")
     plain = ctx.get("moves_plain") or {}
     closed = ctx.get("closed_today") or []
@@ -342,8 +397,20 @@ def build_report(ctx: dict) -> str:
     for p in filled:
         L.append(f"  bought {p['symbol']:<5} {p['qty']:>4.0f} @ {p['entry_price']:.2f}")
         L += _wrap(plain.get(f"bought:{p['symbol']}", ""))
-    L.append(f"  holding {len(ctx['positions'])} names, {ctx.get('unrealized', 0):+,.2f} unrealized")
+    L.append(f"  holding {len(ctx['positions'])} names, {ctx.get('unrealized', 0):+,.2f} unrealized at the close")
     L.append("")
+
+    h = ctx.get("holdings")
+    if h and h["rows"]:
+        L.append(f"CURRENT HOLDINGS (as of close {h['asof']})" if h.get("asof") else "CURRENT HOLDINGS")
+        L.append(f"  {'Symbol':<7}{'Shares':>7}{'Close':>10}{'Value':>11}{'Weight':>8}{'Day':>8}{'Since entry':>22}")
+        for r in h["rows"]:
+            since = f"{_pct(r['pnl_pct'])} (${r['pnl']:+,.2f})"
+            L.append(f"  {r['symbol']:<7}{r['qty']:>7.0f}{r['close']:>10.2f}{r['value']:>11,.2f}"
+                     f"{r['weight']:>8.1%}{_pct(r['day_pct']):>8}{since:>22}" + ("  *live mark" if r["live_mark"] else ""))
+        L.append(f"  invested ${h['invested']:,.2f} ({h['invested'] / h['equity']:.0%}) + cash ${h['cash']:,.2f} "
+                 f"= ${h['equity']:,.2f}; unrealized ${h['pnl']:+,.2f}")
+        L.append("")
 
     L.append("ORDERS WORKING FOR TOMORROW'S OPEN")
     staged = ctx.get("staged") or []
