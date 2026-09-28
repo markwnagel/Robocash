@@ -375,6 +375,13 @@ for p in daily report weekly-audit; do
 done
 ```
 
+**Allow them in the background.** macOS loads these jobs at login only if they are switched on under System
+Settings > General > Login Items & Extensions > Allow in the Background, where they appear as `teamrobo-desk`,
+`teamrobo-email` and `caffeinate` (the weekly audit). The desk and email jobs run the scripts in `launchd/` for
+that reason: as inline `/bin/sh -c` commands both were listed as "sh", were switched off, and after a restart on
+2026-09-27 neither loaded, so 09-28 had no desk run or email until they were started by hand. After any restart,
+`launchctl list | grep alpaca-desk` should show all three.
+
 **launchd schedules use the Mac's local time.** This Mac is on Pacific time, so the desk job's plist says 13:45
 to run at 16:45 ET, 45 minutes after the close. (From 2026-09-17 to 09-24 it said 16:45, which meant 19:45 ET:
 the desk ran after the 14:00 email, and every email in that stretch described the previous evening's run

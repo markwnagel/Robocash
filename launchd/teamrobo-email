@@ -1,0 +1,10 @@
+#!/bin/sh
+# TeamRobo daily email - launchd job com.alpaca-desk.report, weekdays 14:00 local.
+# A named script so macOS lists it as "teamrobo-email" under Allow in the Background (see teamrobo-desk).
+#
+# Two steps: the agent monitor first, so the email carries today's health summary, then the report.
+# ';' not '&&': a failed monitor must never cost the day's email. caffeinate -i on each because launchd
+# does not wake the Mac and it sleeps after a minute idle (pmset wakes it at 13:40).
+cd "$(dirname "$0")/.." || exit 1
+/usr/bin/caffeinate -i .venv/bin/python monitor.py
+exec /usr/bin/caffeinate -i .venv/bin/python report_daily.py
