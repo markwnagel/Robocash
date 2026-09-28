@@ -1,0 +1,13 @@
+#!/bin/sh
+# TeamRobo desk run - launchd job com.alpaca-desk.daily, weekdays 13:45 local (16:45 ET).
+# A named script rather than an inline /bin/sh command so macOS lists it as "teamrobo-desk" under
+# System Settings > General > Login Items & Extensions > Allow in the Background; as "sh" it was
+# switched off there, and after a restart the job was never loaded (2026-09-28 missed its run).
+#
+# caffeinate -i keeps the Mac from idling to sleep while the job works (pmset wakes it at 13:40).
+# The second caffeinate holds it awake 20 more minutes so the 14:00 email job is not cut short.
+cd "$(dirname "$0")/.." || exit 1
+/usr/bin/caffeinate -i .venv/bin/python run_daily.py
+status=$?
+/usr/bin/caffeinate -i -t "${TEAMROBO_HOLD_SECONDS:-1200}"
+exit $status
