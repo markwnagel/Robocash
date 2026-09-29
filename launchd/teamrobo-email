@@ -1,10 +1,28 @@
 #!/bin/sh
-# TeamRobo daily email - launchd job com.alpaca-desk.report, weekdays 14:00 local.
+# TeamRobo daily email - launchd job com.alpaca-desk.report, weekdays 14:00 local; also run by
+# teamrobo-desk when the desk finishes after 14:00 and the day's email has not gone out.
 # A named script so macOS lists it as "teamrobo-email" under Allow in the Background (see teamrobo-desk).
 #
 # Two steps: the agent monitor first, so the email carries today's health summary, then the report.
 # ';' not '&&': a failed monitor must never cost the day's email. caffeinate -i on each because launchd
 # does not wake the Mac and it sleeps after a minute idle (pmset wakes it at 13:40).
-cd "$(dirname "$0")/.." || exit 1
+here=$(cd "$(dirname "$0")" && pwd) || exit 1
+cd "$here/.." || exit 1
+
+# One email job at a time: the 14:00 job may still be waiting for a late desk run when that run finishes
+# and starts this script itself. The second one steps aside; report_daily.py also refuses a second email.
+lock=state/.email-job.lock
+mkdir -p state
+if ! mkdir "$lock" 2>/dev/null; then
+  pid=$(cat "$lock/pid" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "$(date '+%F %T') email job already running (pid $pid) - not starting a second"
+    exit 0
+  fi
+  rm -rf "$lock" && mkdir "$lock" || exit 1          # left behind by a run that was killed
+fi
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT
+
 /usr/bin/caffeinate -i .venv/bin/python monitor.py
-exec /usr/bin/caffeinate -i .venv/bin/python report_daily.py
+/usr/bin/caffeinate -i .venv/bin/python report_daily.py

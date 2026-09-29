@@ -39,7 +39,7 @@ from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries
 from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import can_exit_today, enforce_entry_limits, evaluate
 from desk.signals import compute_panels, rerank, snapshot
-from desk import telemetry
+from desk import schedule, telemetry
 from desk.state import load_state, save_state, write_brief
 
 log = logging.getLogger("desk")
@@ -135,6 +135,7 @@ def main() -> None:
                          f"{telemetry.redact(str(e))[:200]}) - no exits or entries today; protective stops were "
                          f"still checked. See state/launchd.log.")
     exits, entries, adds = plan["exits"], plan["entries"], plan["adds"]
+    notes += schedule.schedule_problems(schedule.loaded_jobs(), schedule.repeating_wake())
     try:
         protect(st, broker, exits, notes)
         execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open)

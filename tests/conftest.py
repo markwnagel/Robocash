@@ -41,3 +41,13 @@ def _telemetry_to_tmp(tmp_path, monkeypatch):
     the monitor would read fake calls as production traffic."""
     from desk import telemetry
     monkeypatch.setattr(telemetry, "DIR", tmp_path / "telemetry")
+
+
+@pytest.fixture(autouse=True)
+def _healthy_schedule(monkeypatch):
+    """launchctl and pmset describe this Mac, not the code under test: every test sees a loaded, woken
+    schedule and no installed slots unless it sets its own."""
+    from desk import schedule
+    monkeypatch.setattr(schedule, "loaded_jobs", lambda run=None: {j: True for j in schedule.JOBS})
+    monkeypatch.setattr(schedule, "repeating_wake", lambda run=None: "wakepoweron at 1:40PM weekdays only")
+    monkeypatch.setattr(schedule, "installed_slots", lambda job: [])

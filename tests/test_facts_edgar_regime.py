@@ -327,3 +327,43 @@ def test_social_history_accumulates_while_the_guard_is_off(tmp_path, monkeypatch
     assert "2026-09-25" in hist["TXG"]                                                             # but recorded
     fb.fcfg = {"social_enabled": True}
     assert fb._social("TXG", hist)["social_msgs_per_day"] is not None
+
+
+def test_option_ivs_come_from_one_expiry_even_between_monthlies():
+    # 2026-09-29: the old 20-50 day window (Oct 19 - Nov 18) sat between the Oct 16 and Nov 20 monthlies, so every
+    # name without weekly options came back empty and the implied-vol check did nothing for 6 of 11 holdings.
+    from datetime import date
+    from types import SimpleNamespace
+    from desk.facts import nearest_expiry
+    snap = lambda iv: SimpleNamespace(implied_volatility=iv)          # noqa: E731
+    chain = {"MPC261016C00390000": snap(0.40), "MPC261120C00390000": snap(0.52), "MPC261218C00390000": snap(0.55)}
+    exp, contracts = nearest_expiry(chain, date(2026, 9, 29))
+    assert exp == date(2026, 11, 20) and list(contracts) == ["MPC261120C00390000"]   # 52d beats 17d and 80d
+    assert nearest_expiry({}, date(2026, 9, 29)) == (None, {})
+
+
+def test_a_screen_of_every_listed_stock_does_not_retry_or_warn_for_halted_names(caplog):
+    # Sinovac (SVA) is "active" at Alpaca with no trades in years; the weekly universe screen retried it and
+    # logged a WARNING that the monitor opened a finding on (F-20).
+    import logging
+    import pandas as pd
+    from desk import data as D
+
+    class Bars:
+        def __init__(self, syms):
+            rows = [{"symbol": s, "timestamp": pd.Timestamp("2026-09-28", tz="UTC"), "open": 1.0, "high": 1.0,
+                     "low": 1.0, "close": 1.0, "volume": 1.0} for s in syms if s != "SVA"]
+            self.df = pd.DataFrame(rows).set_index(["symbol", "timestamp"]) if rows else pd.DataFrame()
+
+    calls = []
+
+    class Client:
+        def get_stock_bars(self, req):
+            calls.append(list(req.symbol_or_symbols))
+            return Bars(req.symbol_or_symbols)
+
+    with caplog.at_level(logging.INFO, logger="desk.data"):
+        D.fetch_daily_bars(Client(), ["AAA", "SVA"], 30, expect_gaps=True)
+    assert len(calls) == 1 and not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    D.fetch_daily_bars(Client(), ["AAA", "SVA"], 30)                  # a holdings fetch still retries
+    assert calls[-1] == ["SVA"]

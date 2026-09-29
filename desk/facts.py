@@ -140,6 +140,25 @@ def summarize_chain(snapshots: dict, spot: float) -> dict:
     return {"atm_iv": round(atm_iv, 4), "put_skew": round(skew, 4) if skew is not None else None}
 
 
+OPTION_WINDOW_DAYS = (14, 75)     # wide enough to always hold a monthly expiry (they are 4-5 weeks apart)
+OPTION_TARGET_DAYS = 35           # summarize the one expiry nearest mid-hold, so IVs compare across names
+
+
+def nearest_expiry(snapshots: dict, today, target_days: int = OPTION_TARGET_DAYS) -> tuple:
+    """(expiry, the snapshots for that expiry only). The desk asked for 20-50 days out, a window that falls
+    between two monthly expiries for about half of each month: every name without weekly options (MPC, TXG,
+    UMC, NTRA, TWST, MXL on 2026-09-28) came back empty and the implied-vol check silently did nothing."""
+    by_exp: dict = {}
+    for occ, snap in snapshots.items():
+        parsed = parse_occ(occ)
+        if parsed:
+            by_exp.setdefault(parsed[1], {})[occ] = snap
+    if not by_exp:
+        return None, {}
+    exp = min(by_exp, key=lambda d: (abs((d - today).days - target_days), d))
+    return exp, by_exp[exp]
+
+
 def social_rate(messages: list, now: datetime) -> dict:
     """StockTwits returns the last ~30 messages; convert to a per-day rate and bullish share."""
     if not messages:
@@ -380,16 +399,25 @@ class FactBuilder:
         spot = float(px.iloc[-1])
         rv = float(np.log(px).diff().tail(20).std() * np.sqrt(252))
         out["realized_vol_20d"] = round(rv, 4)
+        lo, hi = OPTION_WINDOW_DAYS
         try:
             chain = self.options.get_option_chain(OptionChainRequest(
                 underlying_symbol=s, feed=OptionsFeed.INDICATIVE,
-                expiration_date_gte=self.today + timedelta(days=20), expiration_date_lte=self.today + timedelta(days=50),
+                expiration_date_gte=self.today + timedelta(days=lo), expiration_date_lte=self.today + timedelta(days=hi),
                 strike_price_gte=round(spot * 0.85, 2), strike_price_lte=round(spot * 1.15, 2)))
-            out.update(summarize_chain(chain, spot))
-            if out["atm_iv"] and rv > 0:
-                out["iv_over_rv"] = round(out["atm_iv"] / rv, 2)
         except Exception as e:
             log.warning("options %s: %s", s, e)
+            out["options_note"] = f"options lookup failed ({type(e).__name__})"
+            return out
+        exp, contracts = nearest_expiry(chain, self.today)
+        if exp is None:
+            out["options_note"] = f"no listed options expiring {lo}-{hi} days out"
+            return out
+        out.update(summarize_chain(contracts, spot), option_expiry=exp.isoformat())
+        if out["atm_iv"] and rv > 0:
+            out["iv_over_rv"] = round(out["atm_iv"] / rv, 2)
+        elif not out["atm_iv"]:
+            out["options_note"] = f"no at-the-money implied vol quoted for the {exp.isoformat()} expiry"
         return out
 
     def _social(self, s: str, hist: dict) -> dict:

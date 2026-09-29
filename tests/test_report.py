@@ -367,3 +367,17 @@ def test_desk_status_reads_the_brief_and_unfinished_runs(tmp_path):
     (tmp_path / f"{today.isoformat()}.md").write_text("DESK BRIEF")
     T.end_run("ok")
     assert rd.desk_status(today, tmp_path) == "done"
+
+
+def test_a_sent_email_leaves_a_marker_and_a_failed_one_does_not(tmp_path, monkeypatch):
+    """The marker is how the 14:00 job and a late desk run's follow-up know the day's email went out."""
+    from datetime import date
+    import report_daily as rd
+    monkeypatch.setattr(rd, "STATE_DIR", tmp_path)
+    today = date(2026, 9, 29)
+    monkeypatch.setattr(rd, "send_email", lambda *a, **k: "SMTP FAILED (SMTPServerDisconnected): x")
+    rd.deliver(today, "s", "text", "<p>", {}, {})
+    assert not rd.sent_marker(today).exists()                     # a failed send must be retried
+    monkeypatch.setattr(rd, "send_email", lambda *a, **k: "emailed mark via smtp")
+    rd.deliver(today, "s", "text", "<p>", {}, {})
+    assert rd.sent_marker(today).read_text().startswith("emailed mark via smtp at ")

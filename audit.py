@@ -18,7 +18,8 @@ from alpaca.data.historical import StockHistoricalDataClient
 from desk.analyst import _call_json
 from desk.config import ROOT, alpaca_keys, load_config
 from desk.data import cached_bars
-from desk.notify import send
+from desk import schedule
+from desk.notify import send, send_email
 from desk import telemetry
 from desk.state import BRIEFS_DIR, STATE_DIR, TRADES_FILE, atomic_write_text, load_state
 
@@ -127,6 +128,12 @@ def main() -> None:
     cfg = load_config()
     acfg = cfg["audit"]
     today = date.today()
+    # The audit is the one job that runs on its own day: if the weekday jobs are not loaded, nothing else will
+    # say so - they are what send the brief and the email (2026-09-28).
+    problems = schedule.schedule_problems(schedule.loaded_jobs(), schedule.repeating_wake())
+    telemetry.note(schedule_problems=len(problems))
+    if problems and not args.stats:
+        send_email("TeamRobo ALERT: scheduled jobs need attention", "\n\n".join(problems), cfg)
     since = today - timedelta(days=acfg["lookback_days"])
 
     trades = pd.read_csv(TRADES_FILE) if TRADES_FILE.exists() else pd.DataFrame()

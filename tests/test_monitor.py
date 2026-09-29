@@ -466,3 +466,27 @@ def test_only_scheduled_real_runs_set_a_job_s_latency():
     assert j["duration_s_scheduled"]["n"] == 1 and j["duration_s_scheduled"]["median"] == 290.0
     # Older events carry no trigger: judged by their dry_run/print_only notes alone, as before.
     assert T.is_production({"job": "desk"}, {"status": "ok"}) and not T.is_production({}, {"print_only": True})
+
+
+def test_a_late_scheduled_start_and_a_missed_slot_are_both_on_record(monkeypatch):
+    from desk import schedule
+    PTZ = timezone(timedelta(hours=-7))
+    monkeypatch.setenv("XPC_SERVICE_NAME", "com.alpaca-desk.daily")
+    monkeypatch.setattr(schedule, "installed_slots", lambda job: [(d, 13, 45) for d in range(5)] if job == "desk" else [])
+    monkeypatch.setattr(schedule, "slot_lateness", lambda label, now, slots=None:
+                        {"slot": "2026-09-29T13:45:00-07:00", "late_min": 47.0})
+    T.start_run("desk")                                       # launchd fired it on wake, 47 minutes late
+    T.end_run("ok")
+    ev = _events()
+    assert ev[0]["late_min"] == 47.0 and ev[1]["event"] == "slot_deferred"
+    # The next job to start finds Monday's desk slot with no scheduled run and records it once.
+    monkeypatch.setattr(T, "first_event_time", lambda directory=None: datetime(2026, 9, 25, 15, 0, tzinfo=PTZ))
+    now = datetime(2026, 9, 29, 13, 44, tzinfo=PTZ)
+    monkeypatch.setattr(T, "load_events", lambda since, until=None, directory=None: [])
+    assert ("desk", datetime(2026, 9, 28, 13, 45, tzinfo=PTZ)) in T.record_missed_slots(now)
+
+
+def test_a_chained_email_run_counts_as_scheduled_work(monkeypatch):
+    monkeypatch.setenv("TEAMROBO_TRIGGER", "chained")
+    assert T.trigger() == "chained"
+    assert T.is_production({"trigger": "chained"}, {"status": "ok"})
