@@ -28,7 +28,7 @@ from desk.notify import send, send_email
 from desk.report import (build_report, diff_fingerprint, fingerprint, holdings_at_close, load_json, movers,
                          notable_news, performance, plain_summaries, quote_url)
 from desk.report_html import build_html
-from desk import telemetry
+from desk import schedule, telemetry
 from desk import trials as T
 from desk.evidence import live_vs_backtest
 from desk.state import STATE_DIR, atomic_write_text, load_state
@@ -178,23 +178,37 @@ def deliver(today: date, subject: str, text: str, html: str, cfg: dict, markers:
     if "FAILED" not in status:
         for path, body in markers.items():
             atomic_write_text(path, body)
+        # One email a day: a late desk run sends the day's email itself (launchd/teamrobo-desk), and this marker
+        # is how it and the 14:00 job know whether that already happened.
+        atomic_write_text(sent_marker(today), f"{status} at {datetime.now().astimezone().isoformat(timespec='seconds')}\n")
     return status
+
+
+def sent_marker(today: date) -> Path:
+    return STATE_DIR / "reports" / f"{today.isoformat()}.sent"
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--print", dest="print_only", action="store_true", help="build and print; send nothing, save nothing")
     ap.add_argument("--html-out", default=None, help="with --print: also write the HTML to this path")
+    ap.add_argument("--resend", action="store_true", help="send even though today's email already went out")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     cfg = load_config()
     root = Path(cfg["_root"])
     today = date.today()
+    if not args.print_only and not args.resend and sent_marker(today).exists():
+        log.info("today's email already went out (%s) - not sending another; --resend overrides",
+                 sent_marker(today).read_text().strip())
+        telemetry.note(email="already sent", status="skipped")
+        return
     key, secret = alpaca_keys()
     trading = TradingClient(key, secret, paper=require_paper(cfg))
     data = StockHistoricalDataClient(key, secret)
     desk_warning = None if args.print_only else wait_for_desk(today, is_trading_day(trading, today))
+    schedule_problems = schedule.schedule_problems(schedule.loaded_jobs(), schedule.repeating_wake())
     telemetry.note(desk_ready=desk_warning is None)
     st = load_state()
 
@@ -280,6 +294,8 @@ def main() -> None:
         "notes": brief_notes(today), "health": health_today(today),
         "evidence": evidence_today(cfg, eq_series), "research": research[0],
         "manual": ([desk_warning] if desk_warning else [])
+                  + [n.split(":", 1)[1].strip() for n in schedule_problems        # unless the brief has it
+                     if not any(b.startswith(n) for b in brief_notes(today))]
                   + [n.split(":", 1)[1].strip() for n in brief_notes(today) if n.startswith("MANUAL ACTION")],
     }
     text, html = build_report(ctx), build_html(ctx)

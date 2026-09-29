@@ -23,6 +23,7 @@ import anthropic
 
 from desk import telemetry
 from desk.config import alpaca_keys, load_config, require_paper
+from desk import schedule
 from desk.monitor import (MONITOR_SCHEMA, baseline_view, brief_signatures, build_system_prompt, compare_roles,
                           expected_runs, fallback_report, hard_alarms, job_signals, log_signatures, match_runs,
                           render_config, role_signals, schedule_slots, summary_for_email)
@@ -173,6 +174,19 @@ def main() -> None:
 
     jobs = job_signals(window, now)
     alarms = hard_alarms(runs, jobs, tdays, window)
+    loaded, wake = schedule.loaded_jobs(), schedule.repeating_wake()
+    for job, ok in (loaded or {}).items():
+        if not ok:          # a job that is not loaded never runs and never logs: say so while this one can
+            alarms.append({"key": f"{job}-not-loaded-{now.date()}", "severity": "SEV1" if job != "audit" else "SEV2",
+                           "title": f"The {job} job is not loaded in launchd",
+                           "detail": f"{schedule.JOBS[job]} will not run until it is loaded again (after a restart "
+                                     f"macOS loads only jobs allowed under Login Items & Extensions > Allow in the "
+                                     f"Background)."})
+    if loaded is not None and wake is None:
+        alarms.append({"key": f"no-wake-{now.date()}", "severity": "SEV2", "title": "No repeating wake is scheduled",
+                       "detail": "pmset has no repeating wake before 13:45: if the Mac sleeps, the desk job waits "
+                                 "for something else to wake it."})
+    missed_events = [e for e in window if e.get("event") in ("slot_missed", "slot_deferred")]
     for r in runs.values():
         r["missed"] = [t.isoformat() for t in r["missed"]]
 
@@ -207,6 +221,9 @@ def main() -> None:
         },
         "schedules": {k: [f"{['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]} {h:02d}:{m:02d}" for d, h, m in v]
                       if v else None for k, v in schedules.items()},
+        "launchd": {"loaded": loaded, "repeating_wake": wake,
+                    "slot_events": [{k: e.get(k) for k in ("event", "slot_job", "job", "slot", "late_min", "ts")}
+                                    for e in missed_events]},
         "trading_days_in_window": sorted(d.isoformat() for d in tdays) if tdays is not None else None,
         "runs": runs, "jobs": jobs,
         "audit_last_run": audits[-1] if audits else None,

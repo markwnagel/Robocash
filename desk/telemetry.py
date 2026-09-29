@@ -19,7 +19,7 @@ import sys
 import time
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import state
@@ -102,21 +102,55 @@ def start_run(job: str) -> str:
     h = _LogHandler(level=logging.WARNING)
     logging.getLogger().addHandler(h)
     _run["handler"] = h
-    emit({"event": "run_start", "pid": os.getpid(), "trigger": trigger(), "args": redact(" ".join(sys.argv[1:]))[:200]})
+    trig = trigger()
+    slot = {}
+    if trig == "launchd":
+        try:
+            from . import schedule
+            slot = schedule.slot_lateness(os.environ.get("XPC_SERVICE_NAME", ""), datetime.now().astimezone())
+        except Exception:           # the record is a nicety; it must never stop a run
+            slot = {}
+    emit({"event": "run_start", "pid": os.getpid(), "trigger": trig, "args": redact(" ".join(sys.argv[1:]))[:200],
+          **slot})
+    if slot.get("late_min", 0) > 10:
+        # Fired by launchd but late: the Mac was asleep (launchd runs a missed calendar job on wake) - monitor R-14.
+        emit({"event": "slot_deferred", "slot": slot["slot"], "late_min": slot["late_min"]})
     return _run["id"]
+
+
+def record_missed_slots(now: datetime | None = None) -> list:
+    """Write a slot_missed event for each weekday slot that passed with no scheduled start (the job was not
+    loaded, or the Mac was off). Every job checks at start, so a missed slot is on record by the next run of
+    anything - including the Saturday audit - instead of being silence (monitor R-14, 2026-09-28)."""
+    try:
+        from . import schedule
+        now = now or datetime.now().astimezone()
+        began = first_event_time()
+        if began is None:
+            return []
+        since = max(began.astimezone(), now - timedelta(days=7))
+        missed = schedule.missed_slots(load_events(now - timedelta(days=8), now), now, since)
+    except Exception:
+        return []
+    for job, slot in missed:
+        emit({"event": "slot_missed", "slot_job": job, "slot": slot.isoformat()})
+    return missed
 
 
 def trigger() -> str:
     """'launchd' for a scheduled run, 'manual' for anything a person or script started. launchd sets
     XPC_SERVICE_NAME to the job's label; without this, dev and print-only runs were mixed into the scheduled
     runs' durations and baselines (monitor F-14, 2026-09-25)."""
+    # "chained": the desk job ran late and sent the day's email itself (launchd/teamrobo-desk sets this).
+    if os.environ.get("TEAMROBO_TRIGGER"):
+        return os.environ["TEAMROBO_TRIGGER"]
     return "launchd" if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.alpaca-desk.") else "manual"
 
 
 def is_production(start: dict, end: dict | None) -> bool:
     """A scheduled run that did real work: launched by launchd (or from before trigger was recorded), not a
     dry run and not print-only."""
-    if start.get("trigger", "launchd") != "launchd":
+    if start.get("trigger", "launchd") not in ("launchd", "chained"):
         return False
     return not (end and (end.get("dry_run") or end.get("print_only")))
 
@@ -147,6 +181,7 @@ def run_job(job: str, fn) -> None:
         fn()
         return
     start_run(job)
+    record_missed_slots()
     try:
         fn()
     except SystemExit as e:

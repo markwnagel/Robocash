@@ -58,9 +58,11 @@ def list_candidate_assets(trading: TradingClient, ucfg: dict) -> list:
 
 
 def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
-                     feed: str = "sip", end: datetime | None = None, start: datetime | None = None) -> dict:
+                     feed: str = "sip", end: datetime | None = None, start: datetime | None = None,
+                     expect_gaps: bool = False) -> dict:
     """Returns {'open','high','low','close','volume'} -> DataFrame[date x symbol]. `start`, when given,
-    replaces the window implied by `days`."""
+    replaces the window implied by `days`. expect_gaps: a screen over every listed stock, where a name with no
+    trades (Sinovac, halted for years but still "active") is expected - no retry, and no warning."""
     # Free-tier SIP requires the request window to end >= 15 minutes in the past.
     end = end or (datetime.now(timezone.utc) - timedelta(minutes=16))
     start = start or end - timedelta(days=int(days * 1.45) + 10)
@@ -94,6 +96,10 @@ def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
     frames = pull(symbols)
     have = with_data(frames)          # once: rebuilding it per symbol scans every row N times
     missing = [s for s in symbols if s not in have]
+    if missing and expect_gaps:
+        log.info("%d of %d listed symbol(s) have no bars (not trading): %s", len(missing), len(symbols),
+                 ", ".join(missing[:10]))
+        missing = []
     if missing and frames:
         # The feed occasionally returns nothing for one name in an otherwise good response (TEVA,
         # 2026-09-24: every day blank). Nothing downstream can tell "no data" from "not ranked", so live
@@ -166,7 +172,7 @@ def build_universe(trading, data, cfg, force=False, cache_name="universe.json") 
             return u["symbols"]
     log.info("refreshing universe")
     syms = list_candidate_assets(trading, ucfg)
-    panel = fetch_daily_bars(data, syms, 30, cfg["data"]["feed"])
+    panel = fetch_daily_bars(data, syms, 30, cfg["data"]["feed"], expect_gaps=True)
     close, vol = panel["close"], panel["volume"]
     dollar_vol = (close * vol).tail(20).mean()
     last = close.ffill().iloc[-1]

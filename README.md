@@ -382,6 +382,13 @@ that reason: as inline `/bin/sh -c` commands both were listed as "sh", were swit
 2026-09-27 neither loaded, so 09-28 had no desk run or email until they were started by hand. After any restart,
 `launchctl list | grep alpaca-desk` should show all three.
 
+**When the schedule slips.** A desk run that finishes after 14:00 (the Mac was asleep at 13:45, or the email job
+never fired) sends the day's email itself: one email job runs at a time and `report_daily.py` sends at most one
+email a day (`state/reports/<date>.sent`; `--resend` overrides). Every job checks at start that all three jobs are
+loaded and that the 13:40 wake is scheduled - a problem appears as a MANUAL ACTION in the brief and the email, a
+SEV1 in the monitor, and an alert email from the Saturday audit. A scheduled start more than 10 minutes late is
+recorded as `slot_deferred`, and a weekday slot with no scheduled start within 3 hours as `slot_missed`.
+
 **launchd schedules use the Mac's local time.** This Mac is on Pacific time, so the desk job's plist says 13:45
 to run at 16:45 ET, 45 minutes after the close. (From 2026-09-17 to 09-24 it said 16:45, which meant 19:45 ET:
 the desk ran after the 14:00 email, and every email in that stretch described the previous evening's run

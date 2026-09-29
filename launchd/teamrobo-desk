@@ -5,9 +5,18 @@
 # switched off there, and after a restart the job was never loaded (2026-09-28 missed its run).
 #
 # caffeinate -i keeps the Mac from idling to sleep while the job works (pmset wakes it at 13:40).
-# The second caffeinate holds it awake 20 more minutes so the 14:00 email job is not cut short.
-cd "$(dirname "$0")/.." || exit 1
+here=$(cd "$(dirname "$0")" && pwd) || exit 1
+cd "$here/.." || exit 1
 /usr/bin/caffeinate -i .venv/bin/python run_daily.py
 status=$?
+
+# The desk ran late (the Mac was asleep at 13:45) or the 14:00 email job never fired: send today's email
+# now rather than not at all. Only one email job runs at a time and report_daily.py sends at most one
+# email a day, so this cannot duplicate one the 14:00 job sent or is sending (monitor R-13, 2026-09-29).
+if [ "$(date +%H%M)" -ge "${TEAMROBO_EMAIL_AT:-1400}" ] && [ ! -e "state/reports/$(date +%F).sent" ]; then
+  TEAMROBO_TRIGGER=chained "$here/teamrobo-email"
+fi
+
+# Hold the Mac awake 20 more minutes so the 14:00 email job is not cut short by sleep.
 /usr/bin/caffeinate -i -t "${TEAMROBO_HOLD_SECONDS:-1200}"
 exit $status

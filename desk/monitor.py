@@ -16,53 +16,7 @@ import yaml
 
 from .telemetry import is_production, signature
 
-# launchd Weekday: 0 or 7 = Sunday, 1 = Monday ... 6 = Saturday.
-def _py_weekday(launchd_wd: int) -> int:
-    return (int(launchd_wd) - 1) % 7
-
-
-def schedule_slots(plist: dict) -> list:
-    """[(python_weekday, hour, minute)] from a launchd plist's StartCalendarInterval."""
-    sci = plist.get("StartCalendarInterval") or []
-    if isinstance(sci, dict):
-        sci = [sci]
-    out = []
-    for s in sci:
-        if "Hour" not in s:
-            continue
-        days = [_py_weekday(s["Weekday"])] if "Weekday" in s else list(range(7))
-        out += [(d, int(s["Hour"]), int(s.get("Minute", 0))) for d in days]
-    return sorted(set(out))
-
-
-def expected_runs(slots: list, start: datetime, end: datetime, grace: timedelta) -> list:
-    """Scheduled times inside [start, end) that are old enough (by `grace`) to have produced a run."""
-    out, day = [], start.date()
-    while day <= end.date():
-        for wd, h, m in slots:
-            if day.weekday() == wd:
-                # launchd fires on local wall-clock time. Resolving each slot through the system's rules for
-                # that date keeps daylight-saving changes from shifting slots by an hour.
-                t = datetime(day.year, day.month, day.day, h, m).astimezone()
-                if start <= t and t + grace <= end:
-                    out.append(t)
-        day += timedelta(days=1)
-    return sorted(out)
-
-
-def match_runs(expected: list, starts: list, early: timedelta = timedelta(minutes=10),
-               late: timedelta = timedelta(hours=3)) -> dict:
-    """Pair each scheduled slot with the first run that started near it. Unpaired slots are missed runs."""
-    starts = sorted(starts)
-    used, matched, missed = set(), [], []
-    for t in expected:
-        hit = next((s for s in starts if s not in used and t - early <= s <= t + late), None)
-        if hit is None:
-            missed.append(t)
-        else:
-            used.add(hit)
-            matched.append({"slot": t, "started": hit, "late_min": round((hit - t).total_seconds() / 60, 1)})
-    return {"matched": matched, "missed": missed, "unscheduled": [s for s in starts if s not in used]}
+from .schedule import expected_runs, match_runs, schedule_slots  # noqa: F401  (shared with the jobs)
 
 
 def _ts(e: dict) -> datetime:
