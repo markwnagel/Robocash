@@ -161,7 +161,8 @@ def main() -> None:
                    protection_mismatch=count("protection MISMATCH"),
                    stop_not_raised=count("stop NOT raised"), decay_deferred=count("signal-decay check deferred"),
                    data_concerns=count("data concern:"), session_open=session_open,
-                   partial_bar=count("session still in progress") > 0, regime=plan.get("regime", "n/a"),
+                   partial_bar=count("session still in progress") > 0, regime=plan.get("regime_label", "n/a"),
+                   regime_state=plan.get("regime", "n/a"),
                    protect_only=protect_only, decision_failed=failure is not None)
     if failure is not None:
         raise failure
@@ -247,7 +248,11 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
 
     day_pcfg = dict(pcfg)
     target_positions = pcfg["target_positions"]
-    regime_liquidate, regime_status = False, "off"
+    # regime_status is the internal state (off / neutral / strong); regime_label is what the brief says for it
+    # (risk-off / risk-on / risk-on (strong)). The run log recorded the first beside a brief showing the second,
+    # so "neutral" read as disagreeing with "risk-on" (monitor F-24); both are recorded now. "disabled" when the
+    # gate is switched off - "off" there read as risk-off.
+    regime_liquidate, regime_status, regime_label = False, "disabled", "disabled"
     if cfg["regime"]["enabled"]:
         try:
             spy = cached_bars(data, ["SPY"], 320, cfg, tag="spy")["close"]["SPY"].dropna()
@@ -256,7 +261,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             rp = regime_params(state, pcfg, cfg["regime"])
             target_positions, regime_liquidate = rp["target_positions"], rp["liquidate"]
             day_pcfg["max_position_pct"] = rp["max_position_pct"]
-            regime_status = state
+            regime_status, regime_label = state, reg["label"]
             vix_txt = f"{reg['vix']:.1f}" if reg["vix"] is not None else "unavailable"
             notes.append(f"regime {reg['label']}: SPY {reg['spy']:.0f} vs {reg['spy_ma'] or 0:.0f} MA, VIX {vix_txt}; "
                          f"target positions {target_positions}, position cap {day_pcfg['max_position_pct']:.0%}"
@@ -267,7 +272,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             log.warning("regime unavailable: %s", e)
             rp = regime_params("off", pcfg, dict(cfg["regime"], off_liquidate=False))
             target_positions, day_pcfg["max_position_pct"] = rp["target_positions"], rp["max_position_pct"]
-            regime_status = "unavailable"
+            regime_status, regime_label = "unavailable", "unavailable (sized as risk-off)"
             notes.append(f"WARNING: regime gate unavailable ({type(e).__name__}) - fail-safe: risk-off target of "
                          f"{target_positions} positions until the SPY/VIX feeds are back; nothing is sold for it")
 
@@ -486,7 +491,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                          "notional": q * px, "add_n": int(pos.get("adds") or 0) + 1})
     return {"exits": exits, "entries": entries, "adds": adds, "trims": trims, "analyst_out": analyst_out,
             "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
-            "regime": regime_status}
+            "regime": regime_status, "regime_label": regime_label}
 
 
 def protect(st: dict, broker, exits: dict, notes: list) -> None:
@@ -575,6 +580,8 @@ def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, ses
                          f"{telemetry.redact(str(ex))[:160]}) - nothing was bought")
             continue
         if not args.dry_run:
+            telemetry.order_event("entry_staged", e["symbol"], order_id=oid, qty=e["qty"], limit=e["limit"],
+                                  stop=e["stop"], target=e.get("target"))
             st["positions"][e["symbol"]] = {
                 "entry_date": today.isoformat(), "entry_price": e["price"], "qty": e["qty"], "stop": e["stop"],
                 "target": e.get("target"), "filled": False, "order_id": oid, "thesis": e["thesis"],

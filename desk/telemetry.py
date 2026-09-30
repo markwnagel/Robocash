@@ -5,6 +5,8 @@ Events
   llm_call              every Claude request: role, model, tokens, cost, latency, outcome
   agent_output          what an LLM role returned, checked against what it was asked for
   log                   WARNING and above from any logger while a run is open
+  order                 the desk's order lifecycle: entry_staged, entry_filled, entry_expired, position_adopted,
+                        position_closed - so a name that appears or disappears can be traced to an order
 
 monitor.py is the only reader. Nothing that trades depends on these files, and writing one must never
 break a run, so every write swallows its own errors.
@@ -108,11 +110,11 @@ def start_run(job: str) -> str:
     if trig == "launchd":
         try:
             from . import schedule
-            slot = schedule.slot_lateness(os.environ.get("XPC_SERVICE_NAME", ""), datetime.now().astimezone())
+            slot = schedule.slot_lateness(launchd_job() or "", datetime.now().astimezone())
         except Exception:           # the record is a nicety; it must never stop a run
             slot = {}
     emit({"event": "run_start", "pid": os.getpid(), "trigger": trig, "args": redact(" ".join(sys.argv[1:]))[:200],
-          "code": code_version(), **slot})
+          "code": code_version(), "launched_via": process_chain(), **slot})
     if slot.get("late_min", 0) > 10:
         # Fired by launchd but late: the Mac was asleep (launchd runs a missed calendar job on wake) - monitor R-14.
         emit({"event": "slot_deferred", "slot": slot["slot"], "late_min": slot["late_min"]})
@@ -156,14 +158,53 @@ def record_missed_slots(now: datetime | None = None) -> list:
     return missed
 
 
+def launchd_job() -> str | None:
+    """The launchd label this run was started under, or None. The plists set TEAMROBO_JOB to their label.
+    launchd's own XPC_SERVICE_NAME reaches only the program it starts: the named scripts start Python two
+    processes down, and every scheduled run on 2026-09-30 recorded itself as manual (monitor F-17).
+    XPC_SERVICE_NAME still counts, for a job whose plist predates TEAMROBO_JOB and starts Python directly."""
+    for name in ("TEAMROBO_JOB", "XPC_SERVICE_NAME"):
+        value = os.environ.get(name, "")
+        if value.startswith("com.alpaca-desk."):
+            return value
+    return None
+
+
 def trigger() -> str:
-    """'launchd' for a scheduled run, 'manual' for anything a person or script started. launchd sets
-    XPC_SERVICE_NAME to the job's label; without this, dev and print-only runs were mixed into the scheduled
-    runs' durations and baselines (monitor F-14, 2026-09-25)."""
+    """'launchd' for a scheduled run, 'manual' for anything a person or script started. Without this, dev and
+    print-only runs were mixed into the scheduled runs' durations and baselines (monitor F-14, 2026-09-25)."""
     # "chained": the desk job ran late and sent the day's email itself (launchd/teamrobo-desk sets this).
     if os.environ.get("TEAMROBO_TRIGGER"):
         return os.environ["TEAMROBO_TRIGGER"]
-    return "launchd" if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.alpaca-desk.") else "manual"
+    return "launchd" if launchd_job() else "manual"
+
+
+def process_chain(pid: int | None = None, depth: int = 6) -> str | None:
+    """Program names from this process up to launchd: "Python<sh<launchd" for a scheduled run (the job script
+    runs under sh), a login shell and terminal for one started by hand. It records how a run started without
+    trusting the run's own label (monitor R-20). None if ps fails."""
+    names, pid = [], pid or os.getpid()
+    try:
+        for _ in range(depth):
+            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True,
+                                 timeout=5).stdout.strip()
+            if not out:
+                break
+            ppid, comm = out.split(None, 1)
+            names.append(Path(comm).name)
+            if pid == 1:
+                break
+            pid = int(ppid)
+    except Exception:
+        return None
+    return "<".join(names) or None
+
+
+def order_event(kind: str, symbol: str, **fields) -> None:
+    """One step of an order's life. The brief says the same in prose, but on 2026-09-29 it listed an expired
+    MXL order and a new MXL order side by side, and the monitor read the next day's fill as a position with
+    no entry (F-23)."""
+    emit({"event": "order", "kind": kind, "symbol": symbol, **fields})
 
 
 def is_production(start: dict, end: dict | None) -> bool:

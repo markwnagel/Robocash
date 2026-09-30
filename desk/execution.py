@@ -9,6 +9,7 @@ from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, QueryOrderS
 from alpaca.trading.requests import (GetOrdersRequest, LimitOrderRequest, MarketOrderRequest, StopLossRequest, StopOrderRequest,
                                      TakeProfitRequest)
 
+from . import telemetry
 from .state import record_trade
 
 log = logging.getLogger("desk.exec")
@@ -202,13 +203,17 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
     for sym in list(st.keys()):
         pos = st[sym]
         if sym in live:
-            if not pos.get("filled"):
+            first_fill = not pos.get("filled")
+            if first_fill:
                 # First sight of the fill. entry_date is when the order was staged (the evening before), so
                 # the day-trade guard needs this to know which positions were bought today.
                 pos["filled_date"] = today.isoformat()
             pos["filled"] = True
             pos["entry_price"] = live[sym]["avg_entry_price"]
             pos["qty"] = live[sym]["qty"]
+            if first_fill and not broker.dry_run:
+                telemetry.order_event("entry_filled", sym, order_id=pos.get("order_id"), staged=pos.get("entry_date"),
+                                      qty=pos["qty"], price=pos["entry_price"])
             if pos.get("pending_exit_reason") and broker.live_exit_orders(sym).get("close") is not None:
                 # The close sent earlier is still working (a second run the same evening, or a sale queued
                 # for the open): the position is exiting. Re-evaluating it would re-place a stop beside the
@@ -245,6 +250,8 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
             exit_price = exit_price or pos.get("last_price") or pos["entry_price"]
             if not broker.dry_run:
                 _log_close(pos, sym, exit_price, today, pos.get("pending_exit_reason", "bracket/stop/target"))
+                telemetry.order_event("position_closed", sym, price=exit_price, qty=pos.get("qty"),
+                                      reason=pos.get("pending_exit_reason", "bracket/stop/target"))
             notes.append(f"{sym} closed at ~{exit_price:.2f} ({pos.get('pending_exit_reason', 'bracket')})")
             # A sell order left resting on a name no longer held (a stop beside a manual close, the other
             # half of an OCO the broker did not cancel) would open a SHORT position when it fires.
@@ -262,7 +269,11 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
             status = broker.order_status(pos.get("order_id", "")) if not broker.dry_run else None
             dead = status in DEAD_ORDER_STATUSES or (status is None and (today - entry).days >= 2)
             if dead:
-                notes.append(f"{sym} entry order never filled ({status or 'stale'}); dropped")
+                # Name the order: the same run can stage a new entry for the name, and on 2026-09-29 "MXL entry
+                # order never filled" beside "BUY MXL" read as one order that later filled (monitor F-23).
+                notes.append(f"{sym} entry order never filled ({status or 'stale'}; staged {pos['entry_date']}); dropped")
+                telemetry.order_event("entry_expired", sym, order_id=pos.get("order_id"), staged=pos["entry_date"],
+                                      status=status or "stale")
                 del st[sym]
     for sym, p in live.items():
         if sym not in st:
@@ -271,6 +282,7 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
                 "stop": None, "target": None, "filled": True, "adopted": True, "thesis": "adopted (manual position)",
             }
             notes.append(f"{sym} adopted from broker (no bracket; time-exit only)")
+            telemetry.order_event("position_adopted", sym, qty=p["qty"], price=p["avg_entry_price"])
     for sym, p in live.items():
         st[sym]["last_price"] = p["current_price"]
     return notes

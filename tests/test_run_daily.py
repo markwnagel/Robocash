@@ -2,7 +2,7 @@
 import json
 import sys
 import time
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 import pandas as pd
 from types import SimpleNamespace
@@ -120,6 +120,11 @@ def wired(monkeypatch, tmp_path, panel):
 def run(argv):
     sys.argv = ["run_daily.py"] + argv
     run_daily.main()
+
+
+def _telemetry_events():
+    from desk import telemetry
+    return telemetry.load_events(datetime(2000, 1, 1, tzinfo=timezone.utc), datetime(2100, 1, 1, tzinfo=timezone.utc))
 
 
 def test_fresh_account_stages_entries(wired, cfg):
@@ -287,6 +292,9 @@ def test_risk_off_regime_halves_target(wired, cfg):
     run(["--no-analyst"])
     assert len(holder["broker"].brackets) <= round(cfg["portfolio"]["target_positions"] * 0.5)
     assert "regime risk-off" in sent[-1]
+    # The run log names the regime as the brief does, with the internal state beside it (monitor F-24).
+    from desk import telemetry
+    assert telemetry._run["fields"]["regime"] == "risk-off" and telemetry._run["fields"]["regime_state"] == "off"
 
 
 def _patched_cfg(monkeypatch, **overrides):
@@ -334,8 +342,29 @@ def test_expired_entry_order_frees_its_slot(wired, cfg):
     st = state_mod.load_state()
     assert "S05" not in st["positions"]          # expired -> dropped the same evening
     assert "S06" in st["positions"]              # still working -> kept, slot still reserved
-    assert "S05 entry order never filled (expired)" in sent[-1]
+    assert f"S05 entry order never filled (expired; staged {yesterday}); dropped" in sent[-1]
     assert "S06" not in [s for s, *_ in holder["broker"].brackets]
+    orders = [(e["kind"], e["symbol"]) for e in _telemetry_events() if e["event"] == "order"]
+    assert ("entry_expired", "S05") in orders and ("entry_expired", "S06") not in orders
+    staged = {s for k, s in orders if k == "entry_staged"}
+    assert staged == {s for s, *_ in holder["broker"].brackets}      # every order placed is on record
+
+
+def test_a_fill_is_recorded_once_with_the_order_it_came_from(wired, cfg):
+    """MXL on 2026-09-30: an order staged 09-29 filled at the open. The brief showed it as held; the telemetry
+    had no entry for it, and the monitor could not tell it from the 09-28 order that had expired (F-23)."""
+    holder, sent = wired
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    state_mod.save_state({**state_mod.load_state(), "positions": {
+        "S05": {"entry_date": yesterday, "entry_price": 50.0, "qty": 4, "stop": 45.0, "target": 65.0,
+                "filled": False, "order_id": "o-1", "thesis": "t"}}})
+    live = {"S05": {"qty": 4, "avg_entry_price": 50.5, "current_price": 51.0, "market_value": 204.0,
+                    "unrealized_pl": 2.0}}
+    holder["broker"] = FakeBroker(positions=live)
+    run(["--no-analyst"])
+    run(["--no-analyst"])                                                   # a second run the same day
+    fills = [e for e in _telemetry_events() if e["event"] == "order" and e["kind"] == "entry_filled"]
+    assert [(f["symbol"], f["order_id"], f["staged"], f["price"]) for f in fills] == [("S05", "o-1", yesterday, 50.5)]
 
 
 def test_stale_bars_suppress_entries(wired, cfg, panel, monkeypatch):
