@@ -387,6 +387,11 @@ that reason: as inline `/bin/sh -c` commands both were listed as "sh", were swit
 2026-09-27 neither loaded, so 09-28 had no desk run or email until they were started by hand. After any restart,
 `launchctl list | grep alpaca-desk` should show all three.
 
+**How a run knows it was scheduled.** Each plist sets `TEAMROBO_JOB` to its label, and telemetry records a run as
+`launchd` only when that is present. launchd's own `XPC_SERVICE_NAME` does not survive the scripts: Python sees
+`0`, and on 2026-09-30 every scheduled run was recorded as manual. Reinstall the plists with the loop above after
+changing them. Every `run_start` also records `launched_via`, the process chain (`Python<sh<launchd` when scheduled).
+
 **When the schedule slips.** A desk run that finishes after 14:00 (the Mac was asleep at 13:45, or the email job
 never fired) sends the day's email itself: one email job runs at a time and `report_daily.py` sends at most one
 email a day (`state/reports/<date>.sent`; `--resend` overrides). Every job checks at start that all three jobs are

@@ -23,6 +23,24 @@ def test_each_job_starts_its_named_script_on_the_same_schedule():
         assert slots == {(d, hour, minute) for d in range(1, 6)}
 
 
+def test_each_job_names_itself_to_the_runs_it_starts():
+    """launchd's XPC_SERVICE_NAME did not reach Python under the named scripts, so on 2026-09-30 every scheduled
+    run was recorded as manual (monitor F-17). The job's label now travels as an ordinary variable."""
+    for p in sorted((ROOT / "launchd").glob("com.alpaca-desk.*.plist")):
+        plist = plistlib.loads(p.read_bytes())
+        assert plist["EnvironmentVariables"] == {"TEAMROBO_JOB": plist["Label"]}, p.name
+
+
+def test_the_job_name_reaches_python_through_the_scripts(tmp_path):
+    root = _fake_project(tmp_path)
+    (root / ".venv" / "bin" / "python").write_text(
+        f'#!/bin/sh\necho "$*=$TEAMROBO_JOB" >> "{tmp_path}/calls.txt"\n')
+    env = {**os.environ, "TEAMROBO_JOB": "com.alpaca-desk.report"}
+    subprocess.run([str(root / "launchd" / "teamrobo-email")], cwd="/", check=True, timeout=60, env=env)
+    assert (root / "calls.txt").read_text().splitlines() == ["monitor.py=com.alpaca-desk.report",
+                                                              "report_daily.py=com.alpaca-desk.report"]
+
+
 def _fake_project(tmp_path: Path, exit_code: int = 0) -> Path:
     """A project root whose python only records how it was called."""
     (tmp_path / "launchd").mkdir()

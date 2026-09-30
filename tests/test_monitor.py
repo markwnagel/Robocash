@@ -486,6 +486,24 @@ def test_a_late_scheduled_start_and_a_missed_slot_are_both_on_record(monkeypatch
     assert ("desk", datetime(2026, 9, 28, 13, 45, tzinfo=PTZ)) in T.record_missed_slots(now)
 
 
+def test_a_scheduled_run_is_recognised_by_the_job_name_its_plist_sets(monkeypatch):
+    # Under the named scripts Python saw XPC_SERVICE_NAME=0, and every 2026-09-30 run read as manual (F-17).
+    monkeypatch.delenv("TEAMROBO_TRIGGER", raising=False)
+    monkeypatch.setenv("XPC_SERVICE_NAME", "0")
+    monkeypatch.delenv("TEAMROBO_JOB", raising=False)
+    assert T.trigger() == "manual" and T.launchd_job() is None
+    monkeypatch.setenv("TEAMROBO_JOB", "com.alpaca-desk.daily")
+    assert T.trigger() == "launchd" and T.launchd_job() == "com.alpaca-desk.daily"
+
+
+def test_a_run_records_the_processes_that_started_it(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_daily.py", "--dry-run"])
+    T.run_job("desk", lambda: None)
+    chain = next(e for e in _events() if e["event"] == "run_start")["launched_via"]
+    assert chain.split("<")[0].lower().startswith("python")      # this process first, then its parents
+    assert len(chain.split("<")) >= 2
+
+
 def test_a_chained_email_run_counts_as_scheduled_work(monkeypatch):
     monkeypatch.setenv("TEAMROBO_TRIGGER", "chained")
     assert T.trigger() == "chained"

@@ -5,9 +5,15 @@
   <key>Label</key><string>com.alpaca-desk.weekly-audit</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
     <string>__PROJECT_DIR__/.venv/bin/python</string>
     <string>__PROJECT_DIR__/audit.py</string>
   </array>
+  <!-- Names the job for the run's telemetry. launchd's own XPC_SERVICE_NAME reaches only the program launchd
+       starts; Python, two processes down, recorded every scheduled run on 2026-09-30 as manual (monitor F-17). -->
+  <key>EnvironmentVariables</key>
+  <dict><key>TEAMROBO_JOB</key><string>com.alpaca-desk.weekly-audit</string></dict>
   <key>WorkingDirectory</key><string>__PROJECT_DIR__</string>
   <!-- Saturday 09:00 local -->
   <key>StartCalendarInterval</key>
