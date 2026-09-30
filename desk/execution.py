@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import (GetOrdersRequest, LimitOrderRequest, StopLossRequest, StopOrderRequest,
+from alpaca.trading.requests import (GetOrdersRequest, LimitOrderRequest, MarketOrderRequest, StopLossRequest, StopOrderRequest,
                                      TakeProfitRequest)
 
 from .state import record_trade
@@ -120,6 +120,15 @@ class Broker:
         return {"stop": next((o for o in live if o.stop_price), None),
                 "target": next((o for o in live if o.limit_price and not o.stop_price), None),
                 "close": next((o for o in live if not o.limit_price and not o.stop_price), None), "error": False}
+
+    def sell_market(self, symbol: str, qty: int) -> str:
+        """A DAY market sell; sent after the close it fills at the next open. Used for trims - the holding's
+        stop order has to be cancelled first, since it reserves every share."""
+        if self.dry_run:
+            log.info("[dry] SELL %s x%d market", symbol, qty)
+            return "dry-run"
+        return str(self.t.submit_order(MarketOrderRequest(symbol=symbol, qty=qty, side=OrderSide.SELL,
+                                                          time_in_force=TimeInForce.DAY)).id)
 
     def submit_exit_protection(self, symbol: str, qty: int, stop: float, target: float | None) -> str:
         """A GTC stop (paired with a target as OCO when there is one) that survives the session.

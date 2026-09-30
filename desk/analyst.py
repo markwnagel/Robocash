@@ -133,8 +133,18 @@ ANALYST_SCHEMA = {
 }
 
 
+def prompt_composition(payload: dict) -> dict:
+    """Size of each part of the desk data an LLM role is sent, in characters (roughly 4 per token), so a jump in
+    input tokens can be traced to a section - or, when these are flat, to web search results, which arrive
+    inside the call (each search added 20-35k tokens on 2026-09-28/29: monitor F-19, R-19)."""
+    sections = {k: len(json.dumps(v, default=str)) for k, v in payload.items()}
+    facts = [x.get("facts") for key in ("holdings", "candidates") for x in payload.get(key) or [] if isinstance(x, dict)]
+    return {"prompt_chars": sections, "prompt_symbols": len(_symbols(payload)),
+            "prompt_fact_chars": sum(len(json.dumps(f, default=str)) for f in facts if f)}
+
+
 def _call_json(system: str, user_text: str, schema: dict, model: str, max_searches: int,
-               role: str = "analyst") -> dict | None:
+               role: str = "analyst", composition: dict | None = None) -> dict | None:
     """Returns None on ANY failure and never raises. The callers treat None as 'fail closed - no new
     entries', but an exception escaping here aborts run_daily before the exits and the protective-stop
     re-placement, leaving positions naked. Catching anthropic.APIError alone is not enough: an
@@ -155,19 +165,21 @@ def _call_json(system: str, user_text: str, schema: dict, model: str, max_search
                 continue
             if resp.stop_reason == "refusal":
                 log.error("model refused: %s", getattr(resp, "stop_details", None))
-                telemetry.llm_call(role, model, started, responses, outcome="refusal", input_chars=len(user_text))
+                telemetry.llm_call(role, model, started, responses, outcome="refusal", input_chars=len(user_text),
+                                  **(composition or {}))
                 return None
             out = _parse("".join(b.text for b in resp.content if b.type == "text"))
             telemetry.llm_call(role, model, started, responses, outcome="ok" if out is not None else "parse_error",
-                               input_chars=len(user_text))
+                               input_chars=len(user_text), **(composition or {}))
             return out
         log.error("still paused after retries")
-        telemetry.llm_call(role, model, started, responses, outcome="paused_out", input_chars=len(user_text))
+        telemetry.llm_call(role, model, started, responses, outcome="paused_out", input_chars=len(user_text),
+                          **(composition or {}))
         return None
     except Exception as e:
         log.error("analyst call failed (%s): %s", type(e).__name__, e)
         telemetry.llm_call(role, model, started, responses, outcome="error", error=f"{type(e).__name__}: {e}",
-                           input_chars=len(user_text))
+                           input_chars=len(user_text), **(composition or {}))
         return None
 
 
@@ -175,7 +187,8 @@ def red_team(payload: dict, cfg: dict) -> dict:
     """Bear case per symbol. Failure returns {} - the analyst then runs without it."""
     acfg = cfg["analyst"]
     out = _call_json(RED_TEAM_SYSTEM, "Desk data (JSON):\n" + json.dumps(payload, indent=1, default=str),
-                     RED_TEAM_SCHEMA, acfg["model"], acfg["red_team_max_web_searches"], role="red_team")
+                     RED_TEAM_SCHEMA, acfg["model"], acfg["red_team_max_web_searches"], role="red_team",
+                     composition=prompt_composition(payload))
     asked = _symbols(payload)
     if not out or "cases" not in out:
         log.warning("red team unavailable")
@@ -211,7 +224,8 @@ def review(payload: dict, cfg: dict) -> dict | None:
     """Returns parsed analyst output, or None on any failure (caller treats None as 'no new entries')."""
     acfg = cfg["analyst"]
     out = _call_json(ANALYST_SYSTEM, "Desk data (JSON):\n" + json.dumps(payload, indent=1, default=str),
-                     ANALYST_SCHEMA, acfg["model"], acfg["max_web_searches"], role="analyst")
+                     ANALYST_SCHEMA, acfg["model"], acfg["max_web_searches"], role="analyst",
+                     composition=prompt_composition(payload))
     asked = _symbols(payload)
     if out is None or "verdicts" not in out:
         log.error("analyst returned unusable output")

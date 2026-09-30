@@ -490,3 +490,35 @@ def test_a_chained_email_run_counts_as_scheduled_work(monkeypatch):
     monkeypatch.setenv("TEAMROBO_TRIGGER", "chained")
     assert T.trigger() == "chained"
     assert T.is_production({"trigger": "chained"}, {"status": "ok"})
+
+
+def test_events_written_after_the_utc_date_rolls_over_are_still_found():
+    """Files are named by UTC date. At 17:26 Pacific on 09-29 it was already 09-30 UTC, and a window from local
+    midnight picked only the 09-29 file: the email's wait-for-desk check could not see an evening desk run."""
+    PTZ = timezone(timedelta(hours=-7))
+    T.DIR.mkdir(parents=True, exist_ok=True)
+    ev = {"event": "run_start", "job": "desk", "run_id": "x", "ts": "2026-09-30T00:26:00+00:00"}
+    (T.DIR / "2026-09-30.jsonl").write_text(json.dumps(ev) + "\n")
+    got = T.load_events(datetime(2026, 9, 29, 0, 0, tzinfo=PTZ), datetime(2026, 9, 29, 17, 30, tzinfo=PTZ))
+    assert [e["run_id"] for e in got] == ["x"]
+
+
+def test_a_slot_covered_by_hand_is_an_alarm_and_a_chained_one_is_not():
+    """09-28 and 09-29: the desk slot 'matched' a run started by hand, so nothing was raised (monitor R-17)."""
+    from datetime import date as _date
+    runs = {"desk": {"matched": [{"slot": "2026-09-29T13:45:00-07:00", "late_min": 42.7, "covered_by": "manual"}]},
+            "report": {"matched": [{"slot": "2026-09-29T14:00:00-07:00", "late_min": 39.6, "covered_by": "chained"},
+                                   {"slot": "2026-09-25T14:00:00-07:00", "late_min": 4.0, "covered_by": None}]}}
+    alarms = M.coverage_alarms(runs, {_date(2026, 9, 29), _date(2026, 9, 25)})
+    assert [a["key"] for a in alarms] == ["desk-manual-cover-2026-09-29"] and alarms[0]["severity"] == "SEV2"
+    assert M.coverage_alarms(runs, set()) == []                        # not a trading day: nothing to alarm on
+
+
+def test_each_llm_call_carries_its_prompt_make_up_and_each_run_its_code_version():
+    from desk.analyst import prompt_composition
+    payload = {"rules": {"a": 1}, "holdings": [{"symbol": "AMD", "facts": {"x": "y" * 100}}],
+               "candidates": [{"symbol": "MXL", "facts": None}]}
+    c = prompt_composition(payload)
+    assert set(c["prompt_chars"]) == {"rules", "holdings", "candidates"} and c["prompt_symbols"] == 2
+    assert c["prompt_fact_chars"] > 100
+    assert T.code_version() is None or len(T.code_version().split("+")[0]) >= 7

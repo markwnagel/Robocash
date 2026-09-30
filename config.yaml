@@ -50,7 +50,11 @@ portfolio:
   target_positions: 12      # 15 tested 2026-09-24 (--stagger 6): lost on return in 4/6 windows, median
                             # -15.9 pts - the same cash spread across more, smaller positions. Keep 12.
   max_positions: 15
-  max_position_pct: 0.10
+  max_position_pct: 0.10      # cap at ENTRY. A winner can drift above it; that is a note, not an action, until:
+  trim_above_pct: 0.15        # a holding at or above this share of equity is trimmed automatically - sold at the
+  trim_to_pct: 0.10           # next open back to this share, its stop re-placed for the rest (owner's rule,
+                              # 2026-09-29; replaced a daily MANUAL ACTION at 10%). 0 turns trimming off. Keep above
+                              # regime.strong_max_position_pct, or a laddered entry would be trimmed on day one.
   cash_floor_pct: 0.05
   max_new_entries_per_day: 4  # spreads entry timing. Backtested 2026-09-12 (3y): unlimited = +104%/DD -27.7%
                               # with six hard-floor hits vs +247%/-20.5% at 4/day - batch entries share one
@@ -127,7 +131,7 @@ facts:
 analyst:
   enabled: true
   model: claude-opus-5
-  max_web_searches: 20
+  max_web_searches: 5
   candidates_to_review: 15     # >= max_positions: entries the analyst has not reviewed are dropped
   reduce_factor: 0.75          # shares kept on an entry the analyst marks REDUCE (floored, min 1 share;
                                # capped at 1.0 in code so it can never enlarge). Was 0.5 until 2026-09-24:
@@ -135,7 +139,8 @@ analyst:
                                # 7.8% open risk against a backtest that assumes full size. Not backtestable
                                # (the analyst is not simulated) - it moves live toward the tested config.
   red_team_enabled: true
-  red_team_max_web_searches: 10
+  red_team_max_web_searches: 5    # was 10; analyst was 20. Each search adds 20-35k input tokens (2026-09-29,
+                                  # monitor F-19); 1-2 a run is normal, 5 caps the worst case
 
 audit:
   model: claude-opus-5

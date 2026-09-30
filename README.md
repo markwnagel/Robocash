@@ -63,6 +63,10 @@ run_daily.py (16:45 ET, weekdays)
                     If the API call fails: no new entries today, holdings untouched. An entry it gives no
                     KEEP / REMOVE / REDUCE verdict for is dropped: nothing is bought unreviewed.
  11. final gate     position count, per-position size, 5% cash floor, day-trade guard (code, not LLM)
+     trim           a holding that drifts to 15% of equity (portfolio.trim_above_pct) is sold back to 10% at the
+                    next open: its stop is cancelled, the excess sold, and the stop re-placed for the rest. Between
+                    the 10% entry cap and 15% it is a note. No trim fired in 8.7 years of backtests - the 3R target
+                    sells a winner first - so this is a safety net, and results are unchanged.
  12. execute        exits: cancel bracket legs, close.  entries: limit @ close*1.005 with attached
                     stop (2 x ATR) and take-profit (3R) - exits run broker-side even if this job dies
       PROTECTION    a bracket's legs inherit the entry's DAY tif: they go live when the entry fills and
@@ -233,7 +237,7 @@ Sharpe here is a necessary condition, not a sufficient one.
 **Results** - regenerate with `python scripts/trials_report.py --write-readme` after testing variants:
 
 <!-- trials:start -->
-_Generated from 18 logged runs (latest 2026-09-25 03:36 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `12be6539`, N = 17 trials._
+_Generated from 19 logged runs (latest 2026-09-30 00:27 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `12be6539`, N = 18 trials._
 
 | Variant | Deflated Sharpe | Return | Max DD | Sharpe | Runs |
 |---|---|---|---|---|---|
@@ -245,13 +249,14 @@ _Generated from 18 logged runs (latest 2026-09-25 03:36 UTC) by `scripts/trials_
 | take-profit 0.0, trail-atr 3.0 | 0.96 | +154% | -19.8% | 1.36 | 1 |
 | max-atr-pct 0.12 | 0.96 | +161% | -24.2% | 1.35 | 1 |
 | pyramid-adds 2, take-profit 0.0, trail-atr 2.0 | 0.95 | +143% | -18.0% | 1.32 | 1 |
-| **current: config.yaml** | 0.95 | +144% | -19.2% | 1.33 | 3 |
+| config.yaml as of 2026-09-25 (superseded) | 0.95 | +144% | -19.2% | 1.33 | 3 |
+| **current: config.yaml** | 0.95 | +144% | -19.2% | 1.33 | 1 |
 | max-new-per-day 0 | 0.95 | +140% | -18.9% | 1.31 | 1 |
-| take-profit 0.0, trail-atr 2.0 | 0.94 | +134% | -18.5% | 1.27 | 1 |
-| target-positions 15 | 0.93 | +131% | -20.1% | 1.23 | 1 |
+| take-profit 0.0, trail-atr 2.0 | 0.95 | +134% | -18.5% | 1.27 | 1 |
+| target-positions 15 | 0.94 | +131% | -20.1% | 1.23 | 1 |
 | ladder True, off-liquidate True | 0.93 | +96% | -20.2% | 1.19 | 1 |
 | max-corr-peers 0 | 0.90 | +103% | -21.2% | 1.08 | 1 |
-| earnings-exit-days 2 | 0.86 | +87% | -22.9% | 0.99 | 1 |
+| earnings-exit-days 2 | 0.87 | +87% | -22.9% | 0.99 | 1 |
 | earnings-block-days 21 | 0.86 | +87% | -20.0% | 0.97 | 1 |
 <!-- trials:end -->
 

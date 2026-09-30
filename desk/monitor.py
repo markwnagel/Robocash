@@ -181,6 +181,25 @@ def compare_roles(window: dict, base: dict) -> dict:
     return out
 
 
+def coverage_alarms(runs: dict, trading_days: set | None) -> list:
+    """SEV2 for each weekday slot that a manual run covered: the job ran, so nothing was missed, but the schedule
+    did not fire and would not have without a person (09-28, 09-29). A run the late desk job chained counts as
+    scheduled; so does a run from before trigger was recorded."""
+    alarms = []
+    for job, r in runs.items():
+        for x in r.get("matched", []):
+            day = x["slot"][:10]
+            if x.get("covered_by") in (None, "launchd", "chained"):
+                continue
+            if trading_days is not None and date.fromisoformat(day) not in trading_days:
+                continue
+            alarms.append({"key": f"{job}-manual-cover-{day}", "severity": "SEV2",
+                           "title": f"The {job} job's {x['slot'][11:16]} slot on {day} did not fire; a manual run covered it",
+                           "detail": f"Started by hand {x.get('late_min')} min after the slot. Check the Mac was on and "
+                                     f"the job loaded: launchd does not run slots missed while the Mac is off."})
+    return alarms
+
+
 def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list | None = None) -> list:
     """Conditions that escalate whether or not the model is reachable. The desk is the job that maintains
     exits and protective stops, so a missed, crashed or hung desk run is SEV1 on its own; so is a holding

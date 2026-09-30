@@ -5,6 +5,9 @@ import time
 from datetime import date, datetime, time as dtime, timedelta
 
 import pandas as pd
+from types import SimpleNamespace
+
+from alpaca.trading.enums import OrderSide
 import pytest
 
 import run_daily
@@ -55,6 +58,12 @@ class FakeBroker:
 
     def is_trading_day(self, day):
         return True
+
+    def sell_market(self, symbol, qty):
+        if getattr(self, "sell_fails", False):
+            raise RuntimeError("insufficient qty available for order")
+        self.sold = getattr(self, "sold", []) + [(symbol, qty)]
+        return "sell-1"
 
     def close(self, symbol):
         self.closed.append(symbol)
@@ -564,22 +573,49 @@ def test_a_holding_with_no_bar_today_is_not_sold_as_signal_decay(wired, cfg, pan
     assert "S03: no complete bar today - signal-decay check deferred" in sent[-1]
 
 
-def test_a_cap_breach_is_raised_every_run_and_leads_the_brief(wired, cfg):
-    """UMC drifted to 10.6-10.9% of equity and stayed there; the only trace was one analyst sentence."""
-    holder, sent = wired
+def _one_holding(holder, qty, price, cash, equity=10000.0):
     recent = (date.today() - timedelta(days=3)).isoformat()
-    live = {"S03": {"qty": 45, "avg_entry_price": 20.0, "current_price": 24.0, "market_value": 1080.0,
-                    "unrealized_plpc": 0.2}}
-    holder["broker"] = FakeBroker(equity=10000.0, cash=8920.0, positions=live)
+    live = {"S03": {"qty": qty, "avg_entry_price": 20.0, "current_price": price, "market_value": qty * price,
+                    "unrealized_plpc": price / 20.0 - 1}}
+    holder["broker"] = FakeBroker(equity=equity, cash=cash, positions=live)
+    holder["broker"].existing_stops["S03"] = SimpleNamespace(stop_price=18.0, qty=qty)
     state_mod.save_state({**state_mod.load_state(), "positions": {
-        "S03": {"entry_date": recent, "entry_price": 20.0, "qty": 45, "stop": 18.0, "target": 27.0,
+        "S03": {"entry_date": recent, "entry_price": 20.0, "qty": qty, "stop": 18.0, "target": 40.0,
                 "filled": True, "thesis": "t"}}})
+
+
+def test_a_drift_over_the_entry_cap_is_a_note_until_the_trim_line(wired, cfg):
+    """UMC at 10.3-10.9% was a MANUAL ACTION every day; the owner's rule (2026-09-29) makes it a note and
+    trims automatically at 15%."""
+    holder, sent = wired
+    _one_holding(holder, qty=45, price=24.0, cash=8920.0)                          # 10.8%
     run(["--no-analyst"])
     brief = sent[-1]
-    assert "MANUAL ACTION NEEDED: 1 item(s)" in brief
-    notes = brief.split("Notes:", 1)[1].splitlines()
-    assert notes[1].startswith("  - MANUAL ACTION: S03 is 10.8% of equity, above the 10% cap - sell 4 share(s)")
-    assert "S03" not in holder["broker"].closed                      # reported, never auto-trimmed
+    assert "MANUAL ACTION" not in brief and "S03 is 10.8% of equity, over the 10% entry cap" in brief
+    assert not getattr(holder["broker"], "sold", []) and "S03" not in holder["broker"].closed
+
+
+def test_a_holding_at_the_trim_line_is_sold_back_to_ten_percent_and_stays_protected(wired, cfg):
+    holder, sent = wired
+    _one_holding(holder, qty=60, price=26.0, cash=8440.0)                          # $1,560 = 15.6%
+    run(["--no-analyst"])
+    b = holder["broker"]
+    assert b.sold == [("S03", 22)]                              # keep floor(10,000 x 10% / 26) = 38
+    assert ("S03", OrderSide.SELL) in b.cancelled               # the old stop reserved all 60 shares
+    assert b.protected[-1] == ("S03", 38, 18.0, 40.0)           # the rest keep their stop and target
+    assert "S03 trimmed: 22 of 60 share(s)" in sent[-1] and "MANUAL ACTION" not in sent[-1]
+    assert state_mod.load_state()["positions"]["S03"]["qty"] == 38
+
+
+def test_a_rejected_trim_re_protects_the_whole_holding(wired, cfg):
+    holder, sent = wired
+    _one_holding(holder, qty=60, price=26.0, cash=8440.0)
+    holder["broker"].sell_fails = True
+    holder["broker"].existing_stops.pop("S03")                  # the cancel went through before the sale failed
+    run(["--no-analyst"])
+    assert "ORDER FAILED: S03 trim" in sent[-1]
+    assert holder["broker"].protected[-1][:2] == ("S03", 60)    # every share protected again
+    assert state_mod.load_state()["positions"]["S03"]["qty"] == 60
 
 
 def test_manual_actions_carry_the_day_they_were_first_raised():
