@@ -118,19 +118,35 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
     trail = float(ecfg.get("trail_atr_multiple") or 0)
     pyr_n = int(pcfg.get("pyramid_max_adds") or 0)
     stop_mult = ecfg["stop_atr_multiple"]
+    trim_above = float(pcfg.get("trim_above_pct") or 0)
+    trim_to = float(pcfg.get("trim_to_pct") or pcfg["max_position_pct"])
     tp_r = float(ecfg.get("take_profit_r_multiple") or 0)
 
-    def close_pos(sym, px, d, reason):
-        p = positions.pop(sym)
+    def sell(sym, qty, px, d, reason):
+        """Sell `qty` shares of a holding: all of them closes it, fewer is a trim that leaves the rest open with
+        the same stop and target. One trade row per sale, its risk the sold shares' share of the position's."""
         nonlocal cash
-        cash += p["qty"] * px
+        p = positions[sym]
+        frac = qty / p["qty"]
+        cash += qty * px
+        risk = p.get("realized_risk")
         trades.append({"symbol": sym, "entry_date": p["entry_date"].date(), "exit_date": d.date(),
-                       "entry_price": p["entry_price"], "exit_price": px, "qty": p["qty"],
-                       "pnl": (px - p["entry_price"]) * p["qty"], "pnl_pct": px / p["entry_price"] - 1,
+                       "entry_price": p["entry_price"], "exit_price": px, "qty": qty,
+                       "pnl": (px - p["entry_price"]) * qty, "pnl_pct": px / p["entry_price"] - 1,
                        "hold_days": (d - p["entry_date"]).days, "reason": reason,
-                       "intended_risk": p.get("intended_risk"), "realized_risk": p.get("realized_risk"),
+                       "intended_risk": p.get("intended_risk"),
+                       "realized_risk": risk * frac if risk is not None else None,
                        "adds": p.get("adds", 0), "final_stop": p["stop"],
                        "spanned_earnings": _report_between(earn_by_sym.get(sym, []), p["entry_date"], d)})
+        if qty >= p["qty"]:
+            positions.pop(sym)
+        else:
+            p["qty"] -= qty
+            if risk is not None:
+                p["realized_risk"] = risk * (1 - frac)
+
+    def close_pos(sym, px, d, reason):
+        sell(sym, positions[sym]["qty"], px, d, reason)
 
     def last(sym):
         """Last known close (forward-filled) on today's row."""
@@ -250,6 +266,19 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             if decay_exit(snap, sym, (d - positions[sym]["entry_date"]).days, ecfg) == "decay":
                 close_pos(sym, last(sym) * (1 - slip), d, "decay")
                 equity = mark()
+
+        if trim_above and positions:
+            # A winner at or above trim_above_pct of equity is sold back to trim_to_pct, as the live desk does
+            # (there at the next open; here at the close, like the other non-stop exits).
+            equity = mark()
+            for sym in list(positions):
+                px = last(sym)
+                if np.isnan(px) or equity <= 0 or positions[sym]["qty"] * px / equity < trim_above:
+                    continue
+                keep = math.floor(equity * trim_to / px)
+                if 1 <= keep < positions[sym]["qty"]:
+                    sell(sym, positions[sym]["qty"] - keep, px * (1 - slip), d, "trim")
+            equity = mark()
 
         if regime_state is not None:
             rp = regime_params(str(regime_state.get(d, "neutral")), pcfg, gcfg)

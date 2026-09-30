@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide
 
 from desk.analyst import analyst_rules, apply_verdicts, red_team, review
 from desk.config import alpaca_keys, load_config, require_paper
@@ -116,7 +117,7 @@ def main() -> None:
     clock = now_et()
     settling = time(16, 0) <= clock.time() < time(*SESSION_DONE)       # the close's prints still arriving
     protect_only = (session_open or settling) and not args.force
-    plan, failure = {"exits": {}, "entries": [], "adds": [], "analyst_out": None, "analyst_status": "skipped",
+    plan, failure = {"exits": {}, "entries": [], "adds": [], "trims": {}, "analyst_out": None, "analyst_status": "skipped",
                      "stale": False, "target_positions": cfg["portfolio"]["target_positions"]}, None
     headline = ""
     if protect_only:
@@ -138,7 +139,7 @@ def main() -> None:
     notes += schedule.schedule_problems(schedule.loaded_jobs(), schedule.repeating_wake())
     try:
         protect(st, broker, exits, notes)
-        execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open)
+        execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open, plan.get("trims"))
     finally:
         st["manual_open"] = age_manual_actions(notes, st.get("manual_open") or {}, today)
         if not args.dry_run:
@@ -270,15 +271,10 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             notes.append(f"WARNING: regime gate unavailable ({type(e).__name__}) - fail-safe: risk-off target of "
                          f"{target_positions} positions until the SPY/VIX feeds are back; nothing is sold for it")
 
-    # The cap is enforced at entry only; a winner can drift through it. Say so every run until it is fixed -
-    # the desk does not trim held positions itself (a partial sell would orphan the broker-side OCO).
-    cap = day_pcfg["max_position_pct"]
-    for sym, p in sorted(live.items()):
-        weight = p["market_value"] / acct["equity"] if acct["equity"] else 0
-        if weight > cap * 1.02 and p["current_price"] > 0:
-            over = int(p["qty"]) - math.floor(acct["equity"] * cap / p["current_price"])
-            notes.append(f"MANUAL ACTION: {sym} is {weight:.1%} of equity, above the {cap:.0%} cap - sell {over} "
-                         f"share(s) to get back under (the desk does not trim held positions automatically)")
+    # The cap is enforced at entry; a winner can drift through it. Up to trim_above_pct that is a note. At or
+    # above it the holding is trimmed back to trim_to_pct at the next open (owner's rule, 2026-09-29) - see
+    # execute() for how the broker-side stop is handled.
+    trims = plan_trims(live, acct["equity"], day_pcfg, notes)
 
     # Trailing stop: ratchet each held name's stop to (highest close since entry - k x ATR), never lower,
     # and push the new level to the broker so it protects from the next session on.
@@ -488,7 +484,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             cash_avail -= q * px
             adds.append({"symbol": sym, "qty": q, "price": px, "limit": entry_limit(px), "stop": float(pos["stop"]),
                          "notional": q * px, "add_n": int(pos.get("adds") or 0) + 1})
-    return {"exits": exits, "entries": entries, "adds": adds, "analyst_out": analyst_out,
+    return {"exits": exits, "entries": entries, "adds": adds, "trims": trims, "analyst_out": analyst_out,
             "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
             "regime": regime_status}
 
@@ -548,9 +544,9 @@ def check_coverage(sym: str, pos: dict, legs: dict, notes: list) -> None:
                      f"{held:g} are held - when it fires it sells {covered - held:g} short; resize it at the broker")
 
 
-def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open) -> None:
-    """Exits, then entries, then adds. One rejected order never stops the rest, and state is saved after each
-    submitted entry so a run killed half way leaves state agreeing with the broker."""
+def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open, trims=None) -> None:
+    """Exits, then trims, then entries, then adds. One rejected order never stops the rest, and state is saved
+    after each submitted entry so a run killed half way leaves state agreeing with the broker."""
     ecfg, rcfg = cfg["exits"], cfg["risk"]
     for sym, reason in exits.items():
         pos = st["positions"][sym]
@@ -568,6 +564,8 @@ def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, ses
                 ensure_stop(broker, sym, pos, notes)
             continue
         pos["pending_exit_reason"] = reason
+    for sym, t in (trims or {}).items():
+        execute_trim(args, today, st, broker, acct, sym, t, exits, notes, rcfg, session_open)
     for e in entries:
         try:
             oid = broker.submit_bracket(e["symbol"], e["qty"], e["limit"], e["stop"], e.get("target"))
@@ -595,6 +593,66 @@ def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, ses
         if not args.dry_run:
             st["positions"][a["symbol"]].update(add_order_id=oid, add_date=today.isoformat())
             save_state(st)
+
+
+def plan_trims(live: dict, equity: float, pcfg: dict, notes: list) -> dict:
+    """{sym: {"sell", "keep", "weight"}} for holdings at or above trim_above_pct of equity, sized back to
+    trim_to_pct. Between the entry cap and the trim line: a note only."""
+    cap = float(pcfg["max_position_pct"])
+    above = float(pcfg.get("trim_above_pct") or 0)
+    to = float(pcfg.get("trim_to_pct") or cap)
+    trims = {}
+    for sym, p in sorted(live.items()):
+        px = float(p.get("current_price") or 0)
+        weight = float(p["market_value"]) / equity if equity else 0
+        if px <= 0 or weight <= cap * 1.02:
+            continue
+        held = int(float(p["qty"]))
+        keep = math.floor(equity * to / px)
+        if above and weight >= above and 1 <= keep < held:
+            trims[sym] = {"sell": held - keep, "keep": keep, "weight": weight}
+            notes.append(f"{sym} is {weight:.1%} of equity, at or above the {above:.0%} trim line - selling "
+                         f"{held - keep} of {held} share(s) at the next open to bring it back to {to:.0%}")
+        else:
+            line = f"; trims automatically at {above:.0%}" if above else ""
+            notes.append(f"{sym} is {weight:.1%} of equity, over the {cap:.0%} entry cap{line}")
+    return trims
+
+
+def execute_trim(args, today, st, broker, acct, sym, t, exits, notes, rcfg, session_open) -> None:
+    """Sell part of a holding and keep the rest protected. The broker-side stop reserves every share, so the
+    sale is refused unless it is cancelled first: cancel, sell, then re-place the stop for what is left - the
+    sequence done by hand for UMC on 2026-09-24. A failure at any step re-protects the holding."""
+    pos = st["positions"].get(sym)
+    if pos is None or sym in exits or pos.get("pending_exit_reason") or not pos.get("filled"):
+        return
+    if not can_exit_today(pos, today, acct["daytrade_count"], rcfg, session_open):
+        notes.append(f"{sym} trim deferred a day (day-trade guard)")
+        return
+    try:
+        broker.cancel_symbol_orders(sym, OrderSide.SELL)
+        broker.sell_market(sym, t["sell"])
+    except Exception as e:
+        log.error("trim %s failed: %s", sym, e)
+        notes.append(f"ORDER FAILED: {sym} trim of {t['sell']} share(s) was rejected ({type(e).__name__}: "
+                     f"{telemetry.redact(str(e))[:160]}) - retried next run")
+        if pos.get("stop") is not None:
+            ensure_stop(broker, sym, pos, notes)            # the cancel may already have gone through
+        return
+    held = pos["qty"]
+    if not args.dry_run:
+        pos["qty"] = t["keep"]                              # the next run's sync confirms it from the broker
+        pos["last_trim"] = {"date": today.isoformat(), "sold": t["sell"], "weight": round(t["weight"], 4)}
+    try:
+        if pos.get("stop") is None:
+            raise ValueError("no stop on record")
+        broker.submit_exit_protection(sym, t["keep"], float(pos["stop"]), pos.get("target"))
+        notes.append(f"{sym} trimmed: {t['sell']} of {held:g} share(s) sell at the next open; stop re-placed for "
+                     f"{t['keep']} at {pos['stop']:.2f}")
+    except Exception as e:
+        log.error("protective stop after trimming %s rejected: %s", sym, e)
+        notes.append(f"MANUAL ACTION: {sym} {NO_STOP}: the trim sale is queued but re-placing the stop for the "
+                     f"{t['keep']} remaining share(s) failed ({type(e).__name__}) - place it at the broker")
 
 
 def age_manual_actions(notes: list, open_since: dict, today: date) -> dict:
@@ -625,10 +683,21 @@ def render_brief(mode, today, acct, decision, st, exits, entries, notes, headlin
         f"from all-time high ${st.get('all_time_hwm') or eq:,.0f}: {decision.cumulative_drawdown:.1%} "
         f"(floor {rcfg.get('max_cumulative_drawdown_pct', 0):.0%}) | cash ${acct['cash']:,.0f} ({acct['cash'] / eq:.0%})"
     )
+    # Held positions only: staged entries are orders, listed under "Entries staged" (monitor F-21 - MXL, ASST
+    # and CORT showed as holdings at day 0 and the listed values summed to $1,645 over equity).
+    held = {s: p for s, p in st["positions"].items() if p.get("filled", True)}
+    staged = len(st["positions"]) - len(held)
     # The day's target (the regime gate halves it in risk-off), not the configured one.
-    lines.append(f"Positions {len(st['positions'])}/{pcfg['max_positions']} "
-                 f"(target {target if target is not None else pcfg['target_positions']})")
-    for sym, p in sorted(st["positions"].items()):
+    lines.append(f"Positions {len(held)}/{pcfg['max_positions']} "
+                 f"(target {target if target is not None else pcfg['target_positions']})"
+                 + (f" · {staged} staged" if staged else ""))
+    value = sum(float(p["qty"]) * float(p.get("last_price") or p["entry_price"]) for p in held.values())
+    if eq and abs(value + acct["cash"] - eq) > 0.02 * eq:
+        log.warning("brief: holdings $%.0f + cash $%.0f = $%.0f vs equity $%.0f", value, acct["cash"],
+                    value + acct["cash"], eq)
+        notes.append(f"data concern: held positions (${value:,.0f}) plus cash (${acct['cash']:,.0f}) differ from "
+                     f"equity (${eq:,.0f}) by more than 2%")
+    for sym, p in sorted(held.items()):
         held = (today - date.fromisoformat(p["entry_date"])).days
         last = p.get("last_price") or p["entry_price"]
         pnl = last / p["entry_price"] - 1 if p["entry_price"] else 0

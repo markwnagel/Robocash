@@ -24,7 +24,7 @@ import anthropic
 from desk import telemetry
 from desk.config import alpaca_keys, load_config, require_paper
 from desk import schedule
-from desk.monitor import (MONITOR_SCHEMA, baseline_view, brief_signatures, build_system_prompt, compare_roles,
+from desk.monitor import (coverage_alarms, MONITOR_SCHEMA, baseline_view, brief_signatures, build_system_prompt, compare_roles,
                           expected_runs, fallback_report, hard_alarms, job_signals, log_signatures, match_runs,
                           render_config, role_signals, schedule_slots, summary_for_email)
 from desk.notify import send_email
@@ -163,17 +163,22 @@ def main() -> None:
         # now - grace). Judging only slots after the previous run skipped every slot that fell inside the
         # grace period at that run - in steady state, every desk slot - so a missed run never alarmed.
         since = max(start - grace, began.astimezone()) if (last and began) else observable_from
-        starts = [datetime.fromisoformat(e["ts"]).astimezone() for e in history + window
-                  if e.get("event") == "run_start" and e.get("job") == job and e["run_id"] not in manual
-                  and datetime.fromisoformat(e["ts"]).astimezone() >= since - EARLY]
+        start_ev = [e for e in history + window
+                    if e.get("event") == "run_start" and e.get("job") == job and e["run_id"] not in manual
+                    and datetime.fromisoformat(e["ts"]).astimezone() >= since - EARLY]
+        starts = [datetime.fromisoformat(e["ts"]).astimezone() for e in start_ev]
+        # Who covered each slot: a slot "matched" by a person running the job by hand means the schedule did not
+        # fire - 09-28 and 09-29 both read as covered, late, and raised nothing (monitor R-17).
+        trig = {datetime.fromisoformat(e["ts"]).astimezone(): e.get("trigger", "launchd") for e in start_ev}
         m = match_runs(expected_runs(slots, since, now, grace), starts)
-        runs[job] = {"matched": [{**x, "slot": x["slot"].isoformat(), "started": x["started"].isoformat()}
-                                 for x in m["matched"]],
+        runs[job] = {"matched": [{**x, "slot": x["slot"].isoformat(), "started": x["started"].isoformat(),
+                                  "covered_by": trig.get(x["started"])} for x in m["matched"]],
                      "missed": m["missed"], "unscheduled": [s.isoformat() for s in m["unscheduled"]]}
     audits = sorted(e["ts"] for e in history + window if e.get("event") == "run_start" and e.get("job") == "audit")
 
     jobs = job_signals(window, now)
     alarms = hard_alarms(runs, jobs, tdays, window)
+    alarms += coverage_alarms(runs, tdays)
     loaded, wake = schedule.loaded_jobs(), schedule.repeating_wake()
     for job, ok in (loaded or {}).items():
         if not ok:          # a job that is not loaded never runs and never logs: say so while this one can

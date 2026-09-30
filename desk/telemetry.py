@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -111,11 +112,29 @@ def start_run(job: str) -> str:
         except Exception:           # the record is a nicety; it must never stop a run
             slot = {}
     emit({"event": "run_start", "pid": os.getpid(), "trigger": trig, "args": redact(" ".join(sys.argv[1:]))[:200],
-          **slot})
+          "code": code_version(), **slot})
     if slot.get("late_min", 0) > 10:
         # Fired by launchd but late: the Mac was asleep (launchd runs a missed calendar job on wake) - monitor R-14.
         emit({"event": "slot_deferred", "slot": slot["slot"], "late_min": slot["late_min"]})
     return _run["id"]
+
+
+_CODE = {}
+
+
+def code_version() -> str | None:
+    """Short git commit, plus "+dirty" when tracked files have uncommitted edits: ties each run to the code it
+    ran, so a change in behavior or cost can be dated to a commit (monitor R-19). None outside a git checkout."""
+    if "v" not in _CODE:
+        root = Path(__file__).resolve().parent.parent
+        try:
+            git = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True,  # noqa: E731
+                                            text=True, timeout=5).stdout.strip()
+            sha = git("rev-parse", "--short", "HEAD")
+            _CODE["v"] = (sha + ("+dirty" if git("status", "--porcelain", "--untracked-files=no") else "")) or None
+        except Exception:
+            _CODE["v"] = None
+    return _CODE["v"]
 
 
 def record_missed_slots(now: datetime | None = None) -> list:
@@ -265,7 +284,9 @@ def load_events(since: datetime, until: datetime | None = None, directory: Path 
             day = datetime.fromisoformat(p.stem).date()
         except ValueError:
             continue
-        if day < since.date() or day > until.date():
+        # Files are named by the UTC date of their events; since/until may be local times. Compare in UTC, or
+        # every event after 17:00 Pacific (next day's file) was invisible to a same-day local window.
+        if day < since.astimezone(timezone.utc).date() or day > until.astimezone(timezone.utc).date():
             continue
         for line in p.read_text().splitlines():
             try:
