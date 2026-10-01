@@ -319,8 +319,10 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         except (OSError, ValueError):
             hist = {}
         ready = sum(1 for v in hist.values() if len(v) >= 15)
+        # The furthest name's count shows the history growing: "0 of 58" alone read as a stuck counter (R-26).
+        most = max((len(v) for v in hist.values()), default=0)
         notes.append(f"social crowding guard: off, collecting history ({ready} of {len(hist)} names have the 15 "
-                     f"sessions it needs) - not screening for pumps yet")
+                     f"sessions it needs; most so far {most}) - not screening for pumps yet")
     if cfg["facts"]["enabled"]:
         pool = [s for s in snap[snap["eligible"]].index if s not in st["positions"]][: cfg["facts"]["candidate_pool"]]
         try:

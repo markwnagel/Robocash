@@ -343,6 +343,20 @@ def test_monitor_without_the_model_still_escalates_a_missed_desk_run(mon, monkey
     assert len(sent) == 1
 
 
+def test_only_a_sev1_alarm_is_emailed_as_one(mon, monkeypatch):
+    """2026-10-01: a SEV2 manual-coverage alarm went out under a "[SEV1]" subject."""
+    job, sent, tmp = mon
+    sev2 = {"key": "report-manual-cover-2026-09-30", "severity": "SEV2", "title": "slot covered by hand", "detail": "d"}
+    monkeypatch.setattr(job, "hard_alarms", lambda runs, jobs, tdays, events=None: [sev2])
+    _run_monitor(job, ["--no-llm"])
+    assert sent == []
+    assert "slot covered by hand" in (tmp / "monitor" / "reports" / f"{date.today().isoformat()}.md").read_text()
+    sev1 = dict(sev2, key="desk-missed-2026-10-01", severity="SEV1", title="Desk job did not run")
+    monkeypatch.setattr(job, "hard_alarms", lambda runs, jobs, tdays, events=None: [sev2, sev1])
+    _run_monitor(job, ["--no-llm"])
+    assert len(sent) == 1 and "Desk job did not run" in sent[0][0] and "slot covered by hand" not in sent[0][1]
+
+
 def test_monitor_uses_the_models_report_and_the_fallback_opt_in(mon, monkeypatch):
     job, sent, tmp = mon
     result = {"status": "degraded", "summary": "Analyst dropped one holding.", "report_markdown": "# Agent Reliability Report\n...",

@@ -392,15 +392,16 @@ that reason: as inline `/bin/sh -c` commands both were listed as "sh", were swit
 `0`, and on 2026-09-30 every scheduled run was recorded as manual. Reinstall the plists with the loop above after
 changing them. Every `run_start` also records `launched_via`, the process chain (`Python<sh<launchd` when scheduled).
 
-**When the schedule slips.** A desk run that finishes after 14:00 (the Mac was asleep at 13:45, or the email job
+**When the schedule slips.** A desk run that finishes after 14:00 (the Mac was asleep at 13:40, or the email job
 never fired) sends the day's email itself: one email job runs at a time and `report_daily.py` sends at most one
 email a day (`state/reports/<date>.sent`; `--resend` overrides). Every job checks at start that all three jobs are
 loaded and that the 13:40 wake is scheduled - a problem appears as a MANUAL ACTION in the brief and the email, a
 SEV1 in the monitor, and an alert email from the Saturday audit. A scheduled start more than 10 minutes late is
 recorded as `slot_deferred`, and a weekday slot with no scheduled start within 3 hours as `slot_missed`.
 
-**launchd schedules use the Mac's local time.** This Mac is on Pacific time, so the desk job's plist says 13:45
-to run at 16:45 ET, 45 minutes after the close. (From 2026-09-17 to 09-24 it said 16:45, which meant 19:45 ET:
+**launchd schedules use the Mac's local time.** This Mac is on Pacific time, so the desk job's plist says 13:40
+to run at 16:40 ET, 40 minutes after the close, the same minute pmset wakes the Mac. At 13:45 it missed that
+wake: the Mac slept again 94 seconds after waking and the run waited for the next wake at 13:57 (2026-10-01). (From 2026-09-17 to 09-24 it said 16:45, which meant 19:45 ET:
 the desk ran after the 14:00 email, and every email in that stretch described the previous evening's run
 without its notes. On a machine in another zone, convert before editing.)
 
@@ -422,7 +423,7 @@ rather than the official close - a few dollars either way on seven positions. Th
 snapshot time for this reason. Cash matches to the penny; only position marks drift.
 
 **launchd does not wake a sleeping Mac**, and this one sleeps after a minute idle. A single
-`pmset repeat wakeorpoweron` event covers 13:40, so the desk job holds the machine awake for 20 minutes
+`pmset repeat wakeorpoweron` event at 13:40 starts the desk job, which holds the machine awake for 20 minutes
 after it finishes (`caffeinate -i -t 1200` in its plist) to carry it through the 14:00 report. The Saturday
 audit has no wake of its own and runs whenever the Mac is next awake - harmless, it only reads.
 
@@ -450,7 +451,7 @@ are redacted before anything is written; a telemetry failure never affects a run
 - **Hard alarms do not depend on the model.** SEV1 in code: a desk run missed on a trading day, crashed, or
   started and never finished; a holding the desk reported without a verified broker-side stop; a kill-switch
   halt; a daily report that did not run, crashed, or whose email failed. Each scheduled slot is judged once, by
-  the first monitor run after it is 10 minutes old (desk) or 60 minutes old (report), so a missed 13:45 desk run
+  the first monitor run after it is 10 minutes old (desk) or 60 minutes old (report), so a missed 13:40 desk run
   is escalated at 14:00 the same day. If the Claude call fails, a deterministic fallback report is still
   written and the alarms still escalate.
 - **Output.** The full report goes to `state/monitor/reports/<date>.md`; the daily email carries a "System

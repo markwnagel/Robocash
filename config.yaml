@@ -152,7 +152,7 @@ notify:
   webhook_payload_key: text
 
 report:
-  to: mark@markwnagel.com   # daily activity email, 14:00 local (after the 13:45 desk run)
+  to: mark@markwnagel.com   # daily activity email, 14:00 local (after the 13:40 desk run)
                             # Credentials live in .env only: SMTP_HOST/SMTP_USER/SMTP_PASSWORD
                             # (+ optional SMTP_PORT, REPORT_FROM), or RESEND_API_KEY.
                             # With neither set the report is still written to state/reports/.

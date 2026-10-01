@@ -97,7 +97,7 @@ def loaded_jobs() -> dict | None:
 
 def repeating_wake() -> str | None:
     """The repeating wake from `pmset -g sched` ("wakepoweron at 1:40PM weekdays only"), or None if there is
-    none. Without it the Mac is asleep at 13:45 and launchd only runs the job when something else wakes it."""
+    none. Without it the Mac is asleep at 13:40 and launchd only runs the job when something else wakes it."""
     try:
         return parse_pmset_sched(subprocess.run(["pmset", "-g", "sched"], capture_output=True, text=True,
                                                 timeout=10).stdout)
@@ -117,7 +117,7 @@ def schedule_problems(loaded: dict | None, wake: str | None) -> list:
                        f"Check it is on under System Settings > General > Login Items & Extensions > Allow in the "
                        f"Background, then run: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{label}.plist")
     if wake is None:
-        out.append("MANUAL ACTION: no repeating wake is scheduled, so the Mac may be asleep at 13:45 and the desk "
+        out.append("MANUAL ACTION: no repeating wake is scheduled, so the Mac may be asleep at 13:40 and the desk "
                    "job will not start until something wakes it. Restore it with: sudo pmset repeat wakepoweron "
                    "MTWRF 13:40:00")
     return out
