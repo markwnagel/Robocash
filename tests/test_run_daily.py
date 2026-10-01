@@ -307,6 +307,19 @@ def _patched_cfg(monkeypatch, **overrides):
     return base
 
 
+def test_the_crowding_guard_note_shows_how_far_its_history_has_got(wired, cfg, monkeypatch, tmp_path):
+    """"0 of 58 names ready" stayed the same for days and read as a counter that never moves (monitor R-26)."""
+    holder, sent = wired
+    base = _patched_cfg(monkeypatch, facts={"social_enabled": False})
+    base["_root"] = str(tmp_path)
+    (tmp_path / "state").mkdir(exist_ok=True)
+    (tmp_path / "state" / "social_history.json").write_text(json.dumps(
+        {"AAA": {f"2026-09-{d:02d}": 1.0 for d in range(1, 7)}, "BBB": {"2026-09-01": 2.0}}))
+    holder["broker"] = FakeBroker()
+    run(["--no-analyst"])
+    assert "(0 of 2 names have the 15 sessions it needs; most so far 6)" in sent[-1]
+
+
 def test_only_fact_checked_names_are_bought(wired, cfg, monkeypatch):
     holder, sent = wired
     _patched_cfg(monkeypatch, facts={"candidate_pool": 3})

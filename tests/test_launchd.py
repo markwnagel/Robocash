@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-JOBS = {"com.alpaca-desk.daily": ("teamrobo-desk", 13, 45), "com.alpaca-desk.report": ("teamrobo-email", 14, 0)}
+JOBS = {"com.alpaca-desk.daily": ("teamrobo-desk", 13, 40), "com.alpaca-desk.report": ("teamrobo-email", 14, 0)}
 
 
 def test_each_job_starts_its_named_script_on_the_same_schedule():

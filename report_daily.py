@@ -35,7 +35,7 @@ from desk.state import STATE_DIR, atomic_write_text, load_state
 
 log = logging.getLogger("desk.report")
 DEAD = {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day", "stopped", "suspended"}
-DESK_WAIT_MINUTES = 20      # the desk starts 13:45 and this job at 14:00; a slow desk run (p95 ~5 min) must not
+DESK_WAIT_MINUTES = 20      # the desk starts 13:40 and this job at 14:00; a slow desk run (p95 ~5 min) must not
                             # leave the email reading a missing brief with nothing to say so (monitor F-15)
 
 

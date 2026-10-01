@@ -35,7 +35,7 @@ log = logging.getLogger("desk.monitor")
 MON_DIR = STATE_DIR / "monitor"
 JOB_PLISTS = {"desk": "com.alpaca-desk.daily", "report": "com.alpaca-desk.report",
               "audit": "com.alpaca-desk.weekly-audit"}
-# How old a slot must be before a missing run_start counts as missed. The desk slot (13:45) is 15 minutes
+# How old a slot must be before a missing run_start counts as missed. The desk slot (13:40) is 20 minutes
 # before this job, so its grace must be shorter than that or a missed desk run is only noticed a day later;
 # run_start is written within seconds of launch, however long the run then takes. The report runs after
 # this job in the same launchd entry, so its slot is always judged the next day. Audit: freshness instead.
@@ -94,8 +94,11 @@ def analyze(system: str, payload: dict, model: str) -> tuple:
         client = anthropic.Anthropic(timeout=600.0, max_retries=1)
         # fallbacks="default": if Opus declines, Anthropic's recommended model for that refusal category
         # answers in the same call instead of leaving the day without a health check.
+        # Output is mostly reasoning and has grown with the open findings it carries: 17k tokens on 09-24, 29.8k
+        # on 10-01 against a 32k cap. A reply cut off at the cap fails to parse and the day falls back to the
+        # deterministic report. Streaming, so a large cap is safe.
         with client.beta.messages.stream(
-            model=model, max_tokens=32000, system=system,
+            model=model, max_tokens=64000, system=system,
             messages=[{"role": "user", "content": USER_PREAMBLE + json.dumps(payload, indent=1, default=str)}],
             output_config={"format": {"type": "json_schema", "schema": MONITOR_SCHEMA}},
             betas=["server-side-fallback-2026-07-01"], fallbacks="default",
@@ -189,7 +192,7 @@ def main() -> None:
                                      f"Background)."})
     if loaded is not None and wake is None:
         alarms.append({"key": f"no-wake-{now.date()}", "severity": "SEV2", "title": "No repeating wake is scheduled",
-                       "detail": "pmset has no repeating wake before 13:45: if the Mac sleeps, the desk job waits "
+                       "detail": "pmset has no repeating wake at 13:40: if the Mac sleeps, the desk job waits "
                                  "for something else to wake it."})
     missed_events = [e for e in window if e.get("event") in ("slot_missed", "slot_deferred")]
     for r in runs.values():
@@ -251,12 +254,14 @@ def main() -> None:
         result, reason = analyze(system, payload, mcfg.get("model", "claude-opus-5"))
         analysis = "claude" if result else "deterministic"
     if result is None:
-        result = {"status": "incident" if alarms else "degraded", "summary": f"Analysis unavailable: {reason}.",
+        sev1 = [a for a in alarms if a.get("severity", "SEV1") == "SEV1"]
+        result = {"status": "incident" if sev1 else "degraded", "summary": f"Analysis unavailable: {reason}.",
                   "report_markdown": fallback_report(payload, reason),
                   "findings": [{"id": f"A-{a['key']}", "signature": a["key"], "title": a["title"],
-                                "severity": "SEV1", "trend": "new", "agents": ["desk-job"]} for a in alarms],
-                  "recommendations": recs, "resolved_finding_ids": [], "escalate": bool(alarms),
-                  "escalation_summary": "; ".join(a["title"] for a in alarms)}
+                                "severity": a.get("severity", "SEV1"), "trend": "new", "agents": ["desk-job"]}
+                               for a in alarms],
+                  "recommendations": recs, "resolved_finding_ids": [], "escalate": bool(sev1),
+                  "escalation_summary": "; ".join(a["title"] for a in sev1)}
 
     report = result["report_markdown"]
     if args.print_only:
@@ -274,8 +279,10 @@ def main() -> None:
     # Alarms whose email failed last time come first: their slot has left the window, so they would never
     # be raised again on their own.
     todo = [tuple(p) for p in mstate.get("pending_escalations", []) if p[0] not in escalated]
-    todo += [(a["key"], a["title"], a["detail"]) for a in alarms
-             if a["key"] not in escalated and a["key"] not in {k for k, _, _ in todo}]
+    # SEV1 only: the coverage alarms are SEV2 (the job ran; the schedule did not fire it), and on 2026-10-01 one of
+    # them went out under a "[SEV1]" subject. SEV2s reach the owner in the daily email and the report.
+    todo += [(a["key"], a["title"], a["detail"]) for a in alarms if a.get("severity") == "SEV1"
+             and a["key"] not in escalated and a["key"] not in {k for k, _, _ in todo}]
     if result.get("escalate"):
         todo += [(f["signature"], f["title"], result.get("escalation_summary", ""))
                  for f in result["findings"] if f["severity"] == "SEV1" and f["signature"] not in escalated
