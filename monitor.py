@@ -26,7 +26,8 @@ from desk.config import alpaca_keys, load_config, require_paper
 from desk import schedule
 from desk.monitor import (coverage_alarms, MONITOR_SCHEMA, baseline_view, brief_signatures, build_system_prompt, compare_roles,
                           expected_runs, fallback_report, hard_alarms, job_signals, log_signatures, match_runs,
-                          render_config, role_signals, schedule_slots, summary_for_email)
+                          render_config, role_signals, schedule_slots, summary_for_email,
+                          commits_since)
 from desk.notify import send_email
 from desk.report import diff_fingerprint, fingerprint, load_json
 from desk.state import STATE_DIR, atomic_write_text
@@ -242,6 +243,7 @@ def main() -> None:
         "brief_signatures": brief_signatures(briefs, base_briefs),
         "latest_brief": latest_brief[:6000] if latest_brief else None,
         "changes": changes,
+        "commits": commits_since(root, start), "code_version": telemetry.code_version(),
         "hard_alarms": alarms,
         "open_findings": open_f, "previous_recommendations": recs,
     }

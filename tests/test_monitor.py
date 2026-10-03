@@ -140,6 +140,32 @@ def test_crashed_and_orphaned_desk_runs_are_hard_alarms_but_a_running_one_is_not
 
 # ------------------------------------------------------------------ signals
 
+def test_the_monitor_sees_the_commits_in_its_window(tmp_path):
+    import subprocess
+    assert M.commits_since(tmp_path, datetime(2026, 1, 1, tzinfo=timezone.utc)) == []     # not a checkout
+    git = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                    check=True, capture_output=True)
+    git("init", "-q")
+    (tmp_path / "f").write_text("x")
+    git("add", "f")
+    git("commit", "-q", "-m", "Run the desk at the 13:40 wake")
+    got = M.commits_since(tmp_path, datetime.now(timezone.utc) - timedelta(days=1))
+    assert [c["subject"] for c in got] == ["Run the desk at the 13:40 wake"] and len(got[0]["sha"]) >= 7
+    assert M.commits_since(tmp_path, datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+def test_role_signals_separate_prompt_growth_from_search_results():
+    """10-02: the red team's input tokens "doubled" and the monitor could not say why, though each call
+    recorded its prompt size and search count. Flat prompt, tokens by search count: search results (F-19)."""
+    def call(tokens, searches):
+        return {"event": "llm_call", "role": "red_team", "outcome": "ok", "input_tokens": tokens,
+                "web_searches": searches, "input_chars": 26500, "prompt_symbols": 12, "cost_usd": 0.5}
+    s = M.role_signals([call(17000, 0), call(43538, 1), call(108758, 2), call(59477, 2)])["red_team"]
+    assert s["input_chars"]["median"] == 26500 and s["input_chars"]["mad"] == 0 and s["prompt_symbols"]["median"] == 12
+    assert {k: v["n"] for k, v in s["input_tokens_by_web_searches"].items()} == {"0": 1, "1": 1, "2": 2}
+    assert len(s["calls_detail"]) == 4 and s["calls_detail"][1]["web_searches"] == 1
+
+
 def test_role_signals_measure_errors_coverage_and_contract_breaks():
     ev = [
         {"event": "llm_call", "role": "analyst", "outcome": "ok", "latency_s": 40, "cost_usd": 0.3,
@@ -498,6 +524,25 @@ def test_a_late_scheduled_start_and_a_missed_slot_are_both_on_record(monkeypatch
     now = datetime(2026, 9, 29, 13, 44, tzinfo=PTZ)
     monkeypatch.setattr(T, "load_events", lambda since, until=None, directory=None: [])
     assert ("desk", datetime(2026, 9, 28, 13, 45, tzinfo=PTZ)) in T.record_missed_slots(now)
+
+
+def test_a_schedule_change_does_not_rewrite_slots_already_judged(monkeypatch):
+    """10-02: after the desk slot moved 13:45 -> 13:40, the first run re-checked the past week against 13:40 and
+    recorded 09-28, 09-29 and 09-30 as missed a second time (F-22)."""
+    from desk import schedule
+    PTZ = timezone(timedelta(hours=-7))
+    monkeypatch.setattr(T, "first_event_time", lambda directory=None: datetime(2026, 9, 24, 15, 0, tzinfo=PTZ))
+    monkeypatch.setattr(schedule, "installed_slots", lambda job: [(d, 13, 40) for d in range(5)] if job == "desk" else [])
+    prev = {"event": "run_start", "run_id": "prev", "job": "report", "trigger": "launchd",
+            "ts": datetime(2026, 10, 1, 14, 0, tzinfo=PTZ).isoformat()}
+    desk_1001 = {"event": "run_start", "run_id": "d", "job": "desk", "trigger": "launchd",    # deferred to a wake
+                 "ts": datetime(2026, 10, 1, 13, 57, 42, tzinfo=PTZ).isoformat()}
+    monkeypatch.setattr(T, "load_events", lambda since, until=None, directory=None: [desk_1001, prev])
+    assert T.record_missed_slots(datetime(2026, 10, 2, 13, 40, 7, tzinfo=PTZ)) == []
+    # Days with no runs at all: the previous start is old, so every slot since then is still checked.
+    prev["ts"] = desk_1001["ts"] = datetime(2026, 9, 28, 9, 0, tzinfo=PTZ).isoformat()
+    got = T.record_missed_slots(datetime(2026, 10, 2, 13, 40, 7, tzinfo=PTZ))
+    assert [t.day for _, t in got] == [28, 29, 30, 1]
 
 
 def test_a_scheduled_run_is_recognised_by_the_job_name_its_plist_sets(monkeypatch):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+import subprocess
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 
@@ -50,6 +51,21 @@ def delta(window: dict, base: dict) -> dict:
     return {"rel_change": round(rel, 3), "robust_z": round((window["median"] - base["median"]) / sd, 2) if sd else None}
 
 
+def commits_since(root, since) -> list:
+    """[{sha, date, subject}] committed to the checkout since `since`, newest first; [] outside git. The report
+    said "not a git repository - no commit history" every day, so each code change could only be read as
+    "file X edited" with no reason attached (2026-10-02)."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "log", f"--since={since.isoformat()}", "-n", "30",
+                              "--format=%h%x09%cI%x09%s"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    rows = [ln.split("\t", 2) for ln in out.stdout.splitlines() if ln.count("\t") >= 2]
+    return [{"sha": a, "date": d, "subject": subj} for a, d, subj in rows]
+
+
 def role_signals(events: list) -> dict:
     """Golden signals per LLM role: rate, errors, duration, tokens and cost, plus output-contract checks."""
     calls, outputs = defaultdict(list), defaultdict(list)
@@ -77,6 +93,18 @@ def role_signals(events: list) -> dict:
             "cost_unknown_calls": sum(1 for x in costs if x is None),
             "web_searches": sum(x.get("web_searches") or 0 for x in c),
             "web_search_usd_total": round(sum(x.get("web_search_usd") or 0 for x in c), 4),
+            # What went in, so token growth can be split into a bigger prompt, more symbols, or search results.
+            # Recorded on every call since R-19 but not passed on: on 10-02 the red team's "doubling" was read
+            # as unexplained when its prompt was flat at ~26.5k chars for 12 symbols and the tokens tracked the
+            # number of searches (43.5k with 1, 108.8k with 2) - F-19.
+            "input_chars": robust([x.get("input_chars") for x in c]),
+            "prompt_symbols": robust([x.get("prompt_symbols") for x in c]),
+            "input_tokens_by_web_searches": {
+                str(k): robust([x.get("input_tokens") for x in c if (x.get("web_searches") or 0) == k])
+                for k in sorted({x.get("web_searches") or 0 for x in c})},
+            "calls_detail": [{k: x.get(k) for k in ("ts", "run_id", "input_tokens", "output_tokens", "web_searches",
+                                                    "prompt_symbols", "input_chars", "prompt_fact_chars", "latency_s")}
+                             for x in c[-10:]],
             "max_turns": max((x.get("turns") or 0 for x in c), default=0),
             "outputs": len(o), "no_answer": sum(1 for x in o if x.get("returned") is None),
             "coverage": round(ret / req, 3) if req else None,
@@ -173,7 +201,8 @@ def compare_roles(window: dict, base: dict) -> dict:
     out = {}
     for role, w in window.items():
         b = base.get(role, {})
-        out[role] = {m: delta(w.get(m, {}), b.get(m, {})) for m in ("latency_s", "cost_usd", "input_tokens", "output_tokens")}
+        out[role] = {m: delta(w.get(m, {}), b.get(m, {}))
+                     for m in ("latency_s", "cost_usd", "input_tokens", "output_tokens", "input_chars")}
         if b.get("error_rate") is not None and w.get("error_rate") is not None:
             out[role]["error_rate"] = {"window": w["error_rate"], "baseline": b["error_rate"]}
         if b.get("coverage") is not None and w.get("coverage") is not None:
@@ -269,8 +298,9 @@ def render_config(mcfg: dict, report_to: str, root: str) -> str:
             "transcripts": "unavailable - prompts and full model responses are not stored; the desk brief "
                            "(state/briefs) and daily report (state/reports) are the closest record",
             "evals": "unavailable - no eval or golden-task suite exists",
-            "change_log": "config.yaml values and code-file hashes diffed against the previous monitor run; "
-                          "installed launchd schedules. Not a git repository - no commit history",
+            "change_log": "git commits since the window start (`commits`) and the commit this run is on "
+                          "(`code_version`, '+dirty' with uncommitted edits); config.yaml values and code-file hashes "
+                          "diffed against the previous monitor run (`changes`); installed launchd schedules",
         },
         "report_cadence": "weekdays, immediately before the 14:00 local daily report",
         "report_window": "since the previous monitor run (normally 24h; up to 7 days after a gap)",

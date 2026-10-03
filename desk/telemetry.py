@@ -149,13 +149,26 @@ def record_missed_slots(now: datetime | None = None) -> list:
         began = first_event_time()
         if began is None:
             return []
-        since = max(began.astimezone(), now - timedelta(days=7))
-        missed = schedule.missed_slots(load_events(now - timedelta(days=8), now), now, since)
+        events = load_events(now - timedelta(days=8), now)
+        since = max(began.astimezone(), now - timedelta(days=7), _previous_check(events, now))
+        missed = schedule.missed_slots(events, now, since)
     except Exception:
         return []
     for job, slot in missed:
         emit({"event": "slot_missed", "slot_job": job, "slot": slot.isoformat()})
     return missed
+
+
+def _previous_check(events: list, now: datetime) -> datetime:
+    """Where the previous run's missed-slot check left off. Every run checks at start, and a slot counts once it
+    is MISSED_AFTER old, so slots older than (previous run start - MISSED_AFTER) were judged then. Re-judging
+    them against today's schedule recorded 09-28..09-30 as missed at 13:40 after the slot moved from 13:45
+    (monitor F-22, 2026-10-02). After days with no runs at all, the previous start is old and they are all checked."""
+    from .schedule import MISSED_AFTER
+    starts = [datetime.fromisoformat(e["ts"]).astimezone() for e in events
+              if e.get("event") == "run_start" and e.get("run_id") != _run["id"]]
+    starts = [t for t in starts if t < now]
+    return max(starts) - MISSED_AFTER if starts else datetime.min.replace(tzinfo=timezone.utc)
 
 
 def launchd_job() -> str | None:
