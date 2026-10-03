@@ -502,4 +502,8 @@ def compact(f: dict) -> dict:
     """What the LLM roles see: everything except bulky raw fields."""
     keep = {k: v for k, v in f.items() if k not in ("headlines", "cik")}
     keep["headlines"] = [f"{h['age_h']}h ago [{h['source']}] {h['headline']}" for h in f.get("headlines", [])[:8]]
+    # news_7d counts every related headline; the list shows the newest 8. Without saying so, AMD's 14 related
+    # and 14 dropped beside 8 listed read as counts that "cannot all be right" (10-02 data concern, F-18).
+    if f.get("news_7d") is not None:
+        keep["headlines_not_shown"] = max(0, f["news_7d"] - len(keep["headlines"]))
     return keep

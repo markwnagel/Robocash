@@ -56,6 +56,9 @@ def analyst_rules(cfg: dict) -> dict:
                                  "candidates on offering_filings; holdings are never blocked by facts"),
         "options": ("atm_iv and put_skew are for option_expiry, the listed expiry nearest 35 days out; options_note "
                     "says why they are missing"),
+        "news_counts": ("news_7d and news_24h count headlines about the company; headlines_dropped_unrelated were "
+                        "returned by the feed but are about other companies and are not in news_7d; headlines lists "
+                        "the newest few and headlines_not_shown counts the rest"),
     }
 
 

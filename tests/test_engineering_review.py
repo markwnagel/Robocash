@@ -231,9 +231,11 @@ def test_the_minutes_after_the_close_are_protect_only_too(wired):
     assert not holder["broker"].brackets and "PROTECT-ONLY RUN at 16:10 ET" in sent[-1]
 
 
-def test_force_runs_everything_mid_session_and_says_the_bar_is_partial(wired):
+def test_force_runs_everything_mid_session_and_says_the_bar_is_partial(wired, panel):
     holder, sent = wired
-    holder["clock"] = holder["clock"].replace(hour=11, minute=0)
+    # Mid-session on the panel's last trading day: on a weekend "today" has no bar, and the test failed.
+    last = panel["close"].index[-1].date()
+    holder["clock"] = holder["clock"].replace(year=last.year, month=last.month, day=last.day, hour=11, minute=0)
     holder["broker"] = FakeBroker()
     holder["broker"].session_open = True
     run(["--no-analyst", "--force"])

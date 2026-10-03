@@ -191,3 +191,13 @@ def test_the_ai_roles_are_told_the_desk_s_own_earnings_rule(cfg):
     assert "inside the hold window that the" not in ANALYST_SYSTEM
     assert "rules.earnings_block_days" in ANALYST_SYSTEM and "rules.earnings_block_days" in RED_TEAM_SYSTEM
     assert r["social_screen"].startswith("off") == (not cfg["facts"].get("social_enabled", True))
+
+
+def test_the_fact_sheet_says_how_many_headlines_it_left_out():
+    """AMD 10-02: news_7d 14 and 14 dropped as unrelated beside 8 listed read as counts that "cannot all be
+    right" (F-18). They were right: 14 related, the newest 8 shown."""
+    from desk.facts import compact
+    hl = [{"age_h": float(i), "source": "x", "headline": f"AMD item {i}"} for i in range(10)]
+    c = compact({"symbol": "AMD", "news_7d": 14, "headlines_dropped_unrelated": 14, "headlines": hl})
+    assert len(c["headlines"]) == 8 and c["headlines_not_shown"] == 6
+    assert "headlines_not_shown" not in compact({"symbol": "X", "news_7d": None, "headlines": []})
