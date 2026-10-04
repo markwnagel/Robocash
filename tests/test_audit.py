@@ -36,3 +36,12 @@ def test_trade_stats_by_reason():
     assert by["signal decay"]["avg_post_exit_20d_ret"] > 0      # we sold a winner that kept going
     assert by["analyst remove"]["avg_post_exit_20d_ret"] < 0    # the veto was right
     assert trade_stats(pd.DataFrame(), None, 20) == {"n_trades": 0}
+
+
+def test_trade_stats_reports_each_post_exit_window():
+    closes = _closes()
+    trades = pd.DataFrame([{"symbol": "AAA", "exit_date": closes.index[5].date(), "exit_price": float(closes["AAA"].iloc[5]),
+                            "pnl": 50.0, "pnl_pct": 0.05, "hold_days": 20, "exit_reason": "signal decay"}])
+    row = trade_stats(trades, closes, [10, 20])["by_exit_reason"]["signal decay"]
+    assert row["avg_post_exit_10d_ret"] > 0 and row["avg_post_exit_20d_ret"] > 0
+    assert row["n_post_exit_10d"] == row["n_post_exit_20d"] == 1

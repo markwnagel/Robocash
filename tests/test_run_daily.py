@@ -635,6 +635,8 @@ def test_a_drift_over_the_entry_cap_is_a_note_until_the_trim_line(wired, cfg):
     brief = sent[-1]
     assert "MANUAL ACTION" not in brief and "S03 is 10.8% of equity, over the 10% entry cap" in brief
     assert not getattr(holder["broker"], "sold", []) and "S03" not in holder["broker"].closed
+    run(["--no-analyst"])                                    # the next day, still over: noted once, not daily
+    assert "over the 10% entry cap" not in sent[-1]
 
 
 def test_a_holding_at_the_trim_line_is_sold_back_to_ten_percent_and_stays_protected(wired, cfg):

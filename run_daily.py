@@ -279,7 +279,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     # The cap is enforced at entry; a winner can drift through it. Up to trim_above_pct that is a note. At or
     # above it the holding is trimmed back to trim_to_pct at the next open (owner's rule, 2026-09-29) - see
     # execute() for how the broker-side stop is handled.
-    trims = plan_trims(live, acct["equity"], day_pcfg, notes)
+    trims = plan_trims(live, acct["equity"], day_pcfg, notes, st["positions"])
 
     # Trailing stop: ratchet each held name's stop to (highest close since entry - k x ATR), never lower,
     # and push the new level to the broker so it protects from the next session on.
@@ -604,9 +604,12 @@ def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, ses
             save_state(st)
 
 
-def plan_trims(live: dict, equity: float, pcfg: dict, notes: list) -> dict:
+def plan_trims(live: dict, equity: float, pcfg: dict, notes: list, positions: dict | None = None) -> dict:
     """{sym: {"sell", "keep", "weight"}} for holdings at or above trim_above_pct of equity, sized back to
-    trim_to_pct. Between the entry cap and the trim line: a note only."""
+    trim_to_pct. Between the entry cap and the trim line: a note the first run a holding crosses the cap, not
+    every run (UMC was noted five days running; the audit of 2026-10-03 called it an alarm with no mechanism
+    behind it). `positions` is state["positions"]: the flag lives there and clears when the holding falls back."""
+    positions = positions if positions is not None else {}
     cap = float(pcfg["max_position_pct"])
     above = float(pcfg.get("trim_above_pct") or 0)
     to = float(pcfg.get("trim_to_pct") or cap)
@@ -615,6 +618,7 @@ def plan_trims(live: dict, equity: float, pcfg: dict, notes: list) -> dict:
         px = float(p.get("current_price") or 0)
         weight = float(p["market_value"]) / equity if equity else 0
         if px <= 0 or weight <= cap * 1.02:
+            positions.get(sym, {}).pop("cap_drift_noted", None)
             continue
         held = int(float(p["qty"]))
         keep = math.floor(equity * to / px)
@@ -622,9 +626,11 @@ def plan_trims(live: dict, equity: float, pcfg: dict, notes: list) -> dict:
             trims[sym] = {"sell": held - keep, "keep": keep, "weight": weight}
             notes.append(f"{sym} is {weight:.1%} of equity, at or above the {above:.0%} trim line - selling "
                          f"{held - keep} of {held} share(s) at the next open to bring it back to {to:.0%}")
-        else:
+        elif not positions.get(sym, {}).get("cap_drift_noted"):
             line = f"; trims automatically at {above:.0%}" if above else ""
             notes.append(f"{sym} is {weight:.1%} of equity, over the {cap:.0%} entry cap{line}")
+            if sym in positions:
+                positions[sym]["cap_drift_noted"] = True
     return trims
 
 
