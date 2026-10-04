@@ -59,17 +59,21 @@ AUDIT_SCHEMA = {
 }
 
 
-def trade_stats(trades: pd.DataFrame, closes: pd.DataFrame | None, post_days: int) -> dict:
+def trade_stats(trades: pd.DataFrame, closes: pd.DataFrame | None, post_days) -> dict:
+    """post_days: one window or several (config audit.post_exit_days). Several, because a 20-day window left
+    every post-exit field empty for the first month of live trading (audit 2026-10-03), and on ~700 backtest
+    stop-outs the 10- and 20-day returns rank trades similarly but not identically (Spearman 0.71) - so the
+    short window is added, not swapped in."""
+    windows = [int(d) for d in (post_days if isinstance(post_days, (list, tuple)) else [post_days])]
     if trades.empty:
         return {"n_trades": 0}
     t = trades.copy()
     t["pnl_pct"] = pd.to_numeric(t["pnl_pct"], errors="coerce")
     t["hold_days"] = pd.to_numeric(t["hold_days"], errors="coerce")
     t["reason_class"] = t["exit_reason"].astype(str).str.split(":").str[0].str.strip().str.lower()
-    if closes is not None:
-        t["post_exit_ret"] = [post_exit_return(closes, r.symbol, r.exit_date, r.exit_price, post_days) for r in t.itertuples()]
-    else:
-        t["post_exit_ret"] = None
+    for d in windows:
+        t[f"post_exit_{d}"] = ([post_exit_return(closes, r.symbol, r.exit_date, r.exit_price, d) for r in t.itertuples()]
+                               if closes is not None else None)
     stats = {
         "n_trades": int(len(t)),
         "win_rate": round(float((t["pnl_pct"] > 0).mean()), 3),
@@ -81,12 +85,13 @@ def trade_stats(trades: pd.DataFrame, closes: pd.DataFrame | None, post_days: in
         "by_exit_reason": {},
     }
     for reason, g in t.groupby("reason_class"):
-        pe = pd.to_numeric(g["post_exit_ret"], errors="coerce").dropna()
-        stats["by_exit_reason"][reason] = {
-            "n": int(len(g)), "avg_pnl_pct": round(float(g["pnl_pct"].mean()), 4),
-            "avg_hold_days": round(float(g["hold_days"].mean()), 1),
-            f"avg_post_exit_{post_days}d_ret": round(float(pe.mean()), 4) if len(pe) else None,
-        }
+        row = {"n": int(len(g)), "avg_pnl_pct": round(float(g["pnl_pct"].mean()), 4),
+               "avg_hold_days": round(float(g["hold_days"].mean()), 1)}
+        for d in windows:
+            pe = pd.to_numeric(g[f"post_exit_{d}"], errors="coerce").dropna()
+            row[f"avg_post_exit_{d}d_ret"] = round(float(pe.mean()), 4) if len(pe) else None
+            row[f"n_post_exit_{d}d"] = int(len(pe))           # exits old enough to measure
+        stats["by_exit_reason"][reason] = row
     return stats
 
 

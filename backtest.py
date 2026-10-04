@@ -76,7 +76,8 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                  Exits still use the real ranks, so only the choice of what to buy changes.
       veto       {"rng", "remove", "reduce", "factor", "half"}: independently per entry, dropped with
                  probability remove (no refill, as live), cut to `factor` with probability reduce, and
-                 halved (the implied-vol rule) with probability half."""
+                 halved (the implied-vol rule) with probability half. "stack": False keeps only the deeper of
+                 the two cuts when both apply (default True: their product, as live does today)."""
     scfg, pcfg, ecfg, rcfg, fcfg = cfg["signals"], cfg["portfolio"], cfg["exits"], cfg["risk"], cfg["facts"]
     gcfg = cfg.get("regime", {})
     slip = slippage_bps / 10000
@@ -324,8 +325,11 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                     r = veto["rng"]
                     if r.random() < veto["remove"]:
                         continue
-                    cut = ((veto["factor"] if r.random() < veto["reduce"] else 1.0)
-                           * (0.5 if r.random() < veto["half"] else 1.0))
+                    cuts = ((veto["factor"] if r.random() < veto["reduce"] else 1.0),
+                            (0.5 if r.random() < veto["half"] else 1.0))
+                    # stack=False: an entry hit by both keeps the deeper cut instead of their product (audit
+                    # 2026-10-03: 0.5 x 0.75 left HUM, DINO, MPC and ASST at 37.5% of intended size).
+                    cut = cuts[0] * cuts[1] if veto.get("stack", True) else min(cuts)
                     if cut < 1.0:
                         q = shrink_qty(sz["qty"], cut)
                         sz = {**sz, "qty": q, "notional": q * float(row["close"])}
@@ -426,6 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--risk-per-trade", type=float, default=None, help="override portfolio.risk_per_trade_pct")
     ap.add_argument("--tag", default="", help="suffix for the output filenames")
     ap.add_argument("--max-corr-peers", type=int, default=None, help="override portfolio.max_correlated_peers")
+    ap.add_argument("--corr-threshold", type=float, default=None, help="override portfolio.correlation_threshold")
     ap.add_argument("--max-new-per-day", type=int, default=None, help="override portfolio.max_new_entries_per_day (0 = unlimited)")
     ap.add_argument("--cum-floor", type=float, default=None, help="override risk.max_cumulative_drawdown_pct (0 = off)")
     ap.add_argument("--earnings-exit-days", type=int, default=None, help="override exits.earnings_exit_days_before (0 = off)")
@@ -455,6 +460,8 @@ def apply_overrides(base: dict, args) -> dict:
         p["risk_per_trade_pct"] = args.risk_per_trade
     if args.max_corr_peers is not None:
         p["max_correlated_peers"] = args.max_corr_peers
+    if args.corr_threshold is not None:
+        p["correlation_threshold"] = args.corr_threshold
     if args.max_new_per_day is not None:
         p["max_new_entries_per_day"] = args.max_new_per_day or None
     if args.cum_floor is not None:

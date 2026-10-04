@@ -64,7 +64,9 @@ portfolio:
                               # pullbacks as the trail. OFF.
   pyramid_trigger_r: 1.0      # add when price >= last entry + this many initial-risk units
   correlation_days: 60
-  correlation_threshold: 0.75
+  correlation_threshold: 0.75  # 0.70 and 0.65 tested 2026-10-03 (audit proposal; state/robustness/2026-10-03-audit):
+                               # frozen 800 x6 starts: return +8-10pt median, drawdown unchanged. Point-in-time
+                               # 2023-26 x4: return worse (0.70 in 3/4, 0.65 in 4/4); 2018-26 x4: mixed. Kept 0.75
   max_correlated_peers: 1     # 0 was backtested 2026-09-12: worse return AND worse drawdown (momentum
                               # leaders share a theme; blocking them reaches down to worse names)
   vol_weighting: true       # notional sizing only
@@ -138,6 +140,11 @@ analyst:
                                # REDUCE hit 10 of the first 19 entries, leaving live at ~52% invested and
                                # 7.8% open risk against a backtest that assumes full size. Not backtestable
                                # (the analyst is not simulated) - it moves live toward the tested config.
+                               # 2026-10-03 (audit proposal): 0.85, and 0.75 applied without stacking on the
+                               # implied-vol half-size, vs today on point-in-time 2018-26 with REDUCE as a random
+                               # cut on 57% and on 90% of entries, 20 paired seeds: each won ~half the seeds and
+                               # median drawdown worsened ~1-3pt. Kept. Revisit with 20+ closed trades: does
+                               # REDUCE-tagged P&L differ from untagged? If not, retire the sizing arm instead.
   red_team_enabled: true
   red_team_max_web_searches: 5    # was 10; analyst was 20. Each search adds 20-35k input tokens (2026-09-29,
                                   # monitor F-19); 1-2 a run is normal, 5 caps the worst case
@@ -145,7 +152,9 @@ analyst:
 audit:
   model: claude-opus-5
   lookback_days: 45
-  post_exit_days: 20
+  post_exit_days: [10, 20]     # trading days after each exit. 20 alone left every field empty for the first month
+                               # live (audit 2026-10-03); on ~700 backtest stop-outs 10d and 20d rank trades with
+                               # Spearman 0.71, so both are reported rather than one replacing the other
 
 notify:
   webhook_url_env: DESK_WEBHOOK_URL
