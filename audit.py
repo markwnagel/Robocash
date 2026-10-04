@@ -1,12 +1,17 @@
 #!/usr/bin/env python
 """Weekly auditor: adversarial review of the *process*, not the stocks. Proposes config changes; never applies them.
 
-  python audit.py            # stats + Claude findings -> state/audits/YYYY-MM-DD.md, webhook
-  python audit.py --stats    # deterministic stats only, no LLM call
+  python audit.py                   # stats + Claude findings -> state/audits/YYYY-MM-DD.md, emailed to report.to
+  python audit.py --stats           # deterministic stats only, no LLM call, nothing sent
+  python audit.py --email-saved     # email the latest saved audit again without re-running it (--date, --resend)
+
+The launchd job com.alpaca-desk.weekly-audit runs it Saturdays 09:00. One email per audit: a marker
+(state/audits/<date>.sent) stops a re-run from sending a second; --resend overrides.
 """
 from __future__ import annotations
 
 import argparse
+import html as htmllib
 import json
 import logging
 from datetime import date, timedelta
@@ -100,6 +105,91 @@ def post_exit_return(closes: pd.DataFrame, symbol: str, exit_date, exit_price, p
     return float(after.iloc[post_days - 1] / float(exit_price) - 1)
 
 
+SEVERITY_COLORS = {"high": "#b42318", "medium": "#b54708", "low": "#475467"}
+
+
+def audit_subject(today: date, out: dict) -> str:
+    counts = {}
+    for f in out.get("findings", []):
+        counts[f["severity"].upper()] = counts.get(f["severity"].upper(), 0) + 1
+    parts = [f"{counts[k]} {k}" for k in ("HIGH", "MEDIUM", "LOW") if counts.get(k)]
+    n = len(out.get("proposed_changes", []))
+    tail = f" | {n} proposed change{'s' if n != 1 else ''}" if n else " | no changes proposed"
+    return f"TeamRobo weekly audit {today.isoformat()} | " + (", ".join(parts) or "no findings") + tail
+
+
+def audit_html(today: date, out: dict, stats: dict, trials: str) -> str:
+    """The same content as the text report, laid out for a mail client. Everything from the model is escaped."""
+    e = htmllib.escape
+    rows = []
+    for f in out.get("findings", []):
+        sev = str(f.get("severity", "")).lower()
+        rows.append(f'<tr><td style="padding:8px 10px 8px 0;vertical-align:top;white-space:nowrap">'
+                    f'<span style="color:#fff;background:{SEVERITY_COLORS.get(sev, "#475467")};border-radius:4px;'
+                    f'padding:2px 6px;font-size:11px;font-weight:600">{e(sev.upper())}</span></td>'
+                    f'<td style="padding:8px 0;vertical-align:top"><b>{e(f["title"])}</b><br>'
+                    f'<span style="color:#475467">{e(f["evidence"])}</span></td></tr>')
+    changes = "".join(
+        f'<li style="margin-bottom:10px"><code>{e(c["config_key"])}</code>: {e(str(c["current"]))} &rarr; '
+        f'<b>{e(str(c["proposed"]))}</b><br><span style="color:#475467">Why: {e(c["rationale"])}</span><br>'
+        f'<span style="color:#475467">Check first: {e(c["backtest_check"])}</span></li>'
+        for c in out.get("proposed_changes", []))
+    return (
+        '<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;'
+        'color:#101828;max-width:760px">'
+        f'<h2 style="margin:0 0 4px">Weekly audit {today.isoformat()}</h2>'
+        '<p style="color:#475467;margin:0 0 16px">Paper trading. Proposals are never applied automatically.</p>'
+        f'<p>{e(out.get("summary", ""))}</p>'
+        f'<p style="background:#f2f4f7;border-radius:6px;padding:10px 12px"><b>Sample size.</b> '
+        f'{e(out.get("sample_size_warning", ""))}</p>'
+        '<h3 style="margin:20px 0 6px">Findings</h3>'
+        f'<table style="border-collapse:collapse">{"".join(rows) or "<tr><td>None.</td></tr>"}</table>'
+        '<h3 style="margin:20px 0 6px">Proposed config changes (not applied)</h3>'
+        f'{"<ol style=padding-left:20px>" + changes + "</ol>" if changes else "<p>None.</p>"}'
+        '<h3 style="margin:20px 0 6px">Statistics</h3>'
+        f'<pre style="background:#f9fafb;border:1px solid #eaecf0;border-radius:6px;padding:10px;font-size:12px;'
+        f'white-space:pre-wrap">{e(json.dumps(stats, indent=1))}</pre>'
+        f'<pre style="font-size:12px;white-space:pre-wrap;color:#475467">{e(trials)}</pre>'
+        '</div>')
+
+
+def sent_marker(day: date) -> Path:
+    return STATE_DIR / "audits" / f"{day.isoformat()}.sent"
+
+
+def email_audit(day: date, out: dict | None, stats: dict | None, text: str, cfg: dict, resend: bool = False,
+                trials: str | None = None) -> str:
+    """Email one audit to report.to, once. The marker is written only after a successful send, so a failed
+    send is retried by --email-saved (or the next run of the day) rather than forgotten."""
+    if not cfg["audit"].get("email", True):
+        return "email off (audit.email)"
+    if sent_marker(day).exists() and not resend:
+        return f"already emailed ({sent_marker(day).name}); --resend to send again"
+    subject = audit_subject(day, out) if out else f"TeamRobo weekly audit {day.isoformat()}"
+    html = audit_html(day, out, stats or {}, trials if trials is not None else "") if out else None
+    status = send_email(subject, text, cfg, html=html)
+    if status.startswith("emailed"):
+        atomic_write_text(sent_marker(day), status + "\n")
+    else:
+        log.warning("audit email not sent: %s", status)
+    return status
+
+
+def email_saved(cfg: dict, day: str | None, resend: bool) -> str:
+    """Send a saved audit again without another model call (a failed Saturday send, or a test)."""
+    out_dir = STATE_DIR / "audits"
+    reports = sorted(out_dir.glob("*.md")) if out_dir.exists() else []
+    if day:
+        reports = [p for p in reports if p.stem == day]
+    if not reports:
+        return f"no saved audit{' for ' + day if day else ''} in {out_dir}"
+    path = reports[-1]
+    saved = out_dir / f"{path.stem}.json"
+    data = json.loads(saved.read_text()) if saved.exists() else {}
+    return email_audit(date.fromisoformat(path.stem), data.get("audit"), data.get("stats"), path.read_text(), cfg,
+                       resend=resend, trials=data.get("trials"))
+
+
 def trials_section(cfg: dict) -> str:
     """The backtest evidence at a glance, and whether the README table still matches the log."""
     from desk import trials as T
@@ -123,11 +213,19 @@ def trials_section(cfg: dict) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stats", action="store_true", help="print deterministic stats only")
+    ap.add_argument("--email-saved", action="store_true", help="email a saved audit instead of running one")
+    ap.add_argument("--date", default=None, help="with --email-saved: the audit's date (default: the latest)")
+    ap.add_argument("--resend", action="store_true", help="send even if this audit was already emailed")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     cfg = load_config()
     acfg = cfg["audit"]
     today = date.today()
+    if args.email_saved:
+        status = email_saved(cfg, args.date, args.resend)
+        print(status)
+        telemetry.note(email=status, email_saved=True)
+        return
     # The audit is the one job that runs on its own day: if the weekday jobs are not loaded, nothing else will
     # say so - they are what send the brief and the email (2026-09-28).
     problems = schedule.schedule_problems(schedule.loaded_jobs(), schedule.repeating_wake())
@@ -166,8 +264,13 @@ def main() -> None:
     out = _call_json(AUDIT_SYSTEM, json.dumps(payload, indent=1, default=str), AUDIT_SCHEMA, acfg["model"], 0,
                      role="auditor")
     if not out:
-        send(f"AUDIT {today}: auditor unavailable. Stats: {json.dumps(stats)}", cfg)
-        telemetry.note(auditor="unavailable", trades=stats.get("n_trades", 0))
+        msg = f"AUDIT {today}: auditor unavailable. Stats: {json.dumps(stats)}"
+        send(msg, cfg)
+        # Said by email too: a Saturday with no audit email otherwise looks the same as one with nothing to say.
+        status = send_email(f"TeamRobo weekly audit {today.isoformat()} | auditor unavailable",
+                            msg + "\n\nThe statistics above are computed without the model; rerun with: python audit.py",
+                            cfg) if acfg.get("email", True) else "email off (audit.email)"
+        telemetry.note(auditor="unavailable", trades=stats.get("n_trades", 0), email=status)
         return
     lines = [f"WEEKLY AUDIT {today.isoformat()}", out["summary"], f"Sample size: {out['sample_size_warning']}", ""]
     for f in out["findings"]:
@@ -182,8 +285,13 @@ def main() -> None:
     out_dir = STATE_DIR / "audits"
     out_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(out_dir / f"{today.isoformat()}.md", text)
+    # The structured answer too, so --email-saved can rebuild the HTML without another model call.
+    atomic_write_text(out_dir / f"{today.isoformat()}.json",
+                      json.dumps({"audit": out, "stats": stats, "trials": trials_section(cfg)}, indent=1, default=str))
     send(text, cfg)
-    telemetry.note(auditor="ok", trades=stats.get("n_trades", 0), proposed_changes=len(out["proposed_changes"]))
+    status = email_audit(today, out, stats, text, cfg)
+    telemetry.note(auditor="ok", trades=stats.get("n_trades", 0), proposed_changes=len(out["proposed_changes"]),
+                   email=status)
 
 
 if __name__ == "__main__":

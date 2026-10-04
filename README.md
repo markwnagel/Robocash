@@ -91,7 +91,7 @@ run_daily.py (16:45 ET, weekdays)
 
 audit.py (Saturday)   deterministic trade stats incl. what each stock did 20 days AFTER we exited, then Claude
                       hunts for process failures and proposes <= 3 config changes with a required backtest check.
-                      It never edits config.
+                      It never edits config. Saved to state/audits/ and emailed to report.to (audit.email).
 ```
 
 ### The governing rule
@@ -130,6 +130,7 @@ cp .env.example .env     # Alpaca paper keys, Anthropic key, SEC_USER_AGENT, opt
 .venv/bin/python run_daily.py --resume        # clear a kill-switch halt (re-baselines the high-water mark)
 .venv/bin/python run_daily.py --no-analyst    # skip red team + analyst (engine + facts + risk only)
 .venv/bin/python audit.py                     # weekly process audit (add --stats for numbers only, no LLM)
+.venv/bin/python audit.py --email-saved       # email the latest saved audit again (--date, --resend)
 .venv/bin/python report_daily.py              # daily activity email (14:00 job); --print to build without sending
 .venv/bin/python backtest.py --start 2023-09-11 --end 2026-09-11              # frozen universe, reproducible
 .venv/bin/python backtest.py --start 2023-09-11 --end 2026-09-11 --risk-per-trade 0.0125 --stagger 6
@@ -470,7 +471,7 @@ are redacted before anything is written; a telemetry failure never affects a run
 
 - Read the daily brief (2 minutes). Nothing needs a reply.
 - Glance at the email's System health section; open `state/monitor/reports/<date>.md` when it is not healthy.
-- Read the Saturday audit; accept a proposed change only after running its backtest check.
+- Read the Saturday audit email; accept a proposed change only after running its backtest check.
 - If the kill switch fires you get a message; nothing trades again until you run `--resume`.
 - To stop everything: `launchctl unload` both plists, then close positions in the Alpaca UI if desired.
 
