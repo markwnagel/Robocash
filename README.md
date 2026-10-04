@@ -238,7 +238,7 @@ Sharpe here is a necessary condition, not a sufficient one.
 **Results** - regenerate with `python scripts/trials_report.py --write-readme` after testing variants:
 
 <!-- trials:start -->
-_Generated from 19 logged runs (latest 2026-09-30 00:27 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `12be6539`, N = 18 trials._
+_Generated from 43 logged runs (latest 2026-10-04 00:08 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `12be6539`, N = 20 trials._
 
 | Variant | Deflated Sharpe | Return | Max DD | Sharpe | Runs |
 |---|---|---|---|---|---|
@@ -249,11 +249,13 @@ _Generated from 19 logged runs (latest 2026-09-30 00:27 UTC) by `scripts/trials_
 | risk-per-trade 0.0125 | 0.97 | +181% | -18.6% | 1.47 | 1 |
 | take-profit 0.0, trail-atr 3.0 | 0.96 | +154% | -19.8% | 1.36 | 1 |
 | max-atr-pct 0.12 | 0.96 | +161% | -24.2% | 1.35 | 1 |
-| pyramid-adds 2, take-profit 0.0, trail-atr 2.0 | 0.95 | +143% | -18.0% | 1.32 | 1 |
+| pyramid-adds 2, take-profit 0.0, trail-atr 2.0 | 0.96 | +143% | -18.0% | 1.32 | 1 |
 | config.yaml as of 2026-09-25 (superseded) | 0.95 | +144% | -19.2% | 1.33 | 3 |
-| **current: config.yaml** | 0.95 | +144% | -19.2% | 1.33 | 1 |
+| **current: config.yaml** | 0.95 | +144% | -19.2% | 1.33 | 3 |
+| corr-threshold 0.65 | 0.95 | +141% | -19.3% | 1.31 | 1 |
 | max-new-per-day 0 | 0.95 | +140% | -18.9% | 1.31 | 1 |
 | take-profit 0.0, trail-atr 2.0 | 0.95 | +134% | -18.5% | 1.27 | 1 |
+| corr-threshold 0.7 | 0.94 | +129% | -19.2% | 1.25 | 1 |
 | target-positions 15 | 0.94 | +131% | -20.1% | 1.23 | 1 |
 | ladder True, off-liquidate True | 0.93 | +96% | -20.2% | 1.19 | 1 |
 | max-corr-peers 0 | 0.90 | +103% | -21.2% | 1.08 | 1 |

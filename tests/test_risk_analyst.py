@@ -191,6 +191,7 @@ def test_the_ai_roles_are_told_the_desk_s_own_earnings_rule(cfg):
     assert "inside the hold window that the" not in ANALYST_SYSTEM
     assert "rules.earnings_block_days" in ANALYST_SYSTEM and "rules.earnings_block_days" in RED_TEAM_SYSTEM
     assert r["social_screen"].startswith("off") == (not cfg["facts"].get("social_enabled", True))
+    assert "15%" in r["position_cap"] and "not a data concern" in r["position_cap"]   # UMC drift, 5 days running
 
 
 def test_the_fact_sheet_says_how_many_headlines_it_left_out():
