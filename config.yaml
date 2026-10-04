@@ -150,6 +150,8 @@ analyst:
                                   # monitor F-19); 1-2 a run is normal, 5 caps the worst case
 
 audit:
+  email: true                  # Saturdays: email the finished audit to report.to (one per audit; audit.py
+                               # --email-saved resends a saved one). The report is also in state/audits/
   model: claude-opus-5
   lookback_days: 45
   post_exit_days: [10, 20]     # trading days after each exit. 20 alone left every field empty for the first month
