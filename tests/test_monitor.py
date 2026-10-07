@@ -1,5 +1,6 @@
 """Telemetry and the agent reliability monitor: what gets recorded, and what the monitor concludes from it."""
 import json
+import time
 import logging
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -152,6 +153,25 @@ def test_the_monitor_sees_the_commits_in_its_window(tmp_path):
     got = M.commits_since(tmp_path, datetime.now(timezone.utc) - timedelta(days=1))
     assert [c["subject"] for c in got] == ["Run the desk at the 13:40 wake"] and len(got[0]["sha"]) >= 7
     assert M.commits_since(tmp_path, datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+def test_a_call_records_what_server_tools_added_to_its_context():
+    """10-06: analyst input 54k tokens vs 25k, same prompt, web_search_requests 0 - nothing recorded said why."""
+    from types import SimpleNamespace as NS
+
+    class Block(NS):
+        def model_dump(self):
+            return dict(self.__dict__)
+    resp = NS(model="claude-opus-5", stop_reason="end_turn",
+              usage=NS(input_tokens=54458, output_tokens=6255, cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                       server_tool_use=NS(web_search_requests=0, web_fetch_requests=2)),
+              content=[Block(type="server_tool_use", name="web_fetch"), Block(type="web_fetch_tool_result", content="x" * 500),
+                       Block(type="server_tool_use", name="web_fetch"), Block(type="text", text="{}")])
+    T.llm_call("analyst", "claude-opus-5", time.monotonic(), [resp])
+    e = [x for x in _events() if x["event"] == "llm_call"][-1]
+    assert e["web_fetches"] == 2 and e["web_searches"] == 0
+    assert e["server_blocks"] == {"server_tool_use:web_fetch": 2, "web_fetch_tool_result": 1}
+    assert e["server_result_chars"] > 500
 
 
 def test_role_signals_separate_prompt_growth_from_search_results():
@@ -334,6 +354,31 @@ def _seed_telemetry(hours_ago: float) -> None:
     with open(T.DIR / f"{t.date().isoformat()}.jsonl", "a") as f:
         f.write(json.dumps({"ts": t.isoformat(timespec="seconds"), "run_id": "old", "job": "report",
                             "event": "run_start"}) + "\n")
+
+
+def test_the_previous_days_desk_run_is_not_reported_as_unscheduled(mon, monkeypatch):
+    """Desk at 13:40, monitor at 14:00: the previous day's 13:40 run sits 20 minutes before the window, inside
+    the 10-minute early tolerance, and was listed as "unscheduled" in every report (F-28, 2026-10-06)."""
+    job, sent, tmp = mon
+    now = datetime.now().astimezone().replace(microsecond=0)
+    slot_today = now - timedelta(minutes=20)
+    monkeypatch.setattr(job, "installed_schedules",
+                        lambda: {"desk": [(d, slot_today.hour, slot_today.minute) for d in range(7)],
+                                 "report": None, "audit": None})
+    (tmp / "monitor").mkdir(parents=True, exist_ok=True)
+    (tmp / "monitor" / "state.json").write_text(json.dumps({"last_run": (now - timedelta(days=1)).isoformat()}))
+    T.DIR.mkdir(parents=True, exist_ok=True)
+    for i, t in enumerate([now - timedelta(days=2), slot_today - timedelta(days=1) + timedelta(seconds=7),
+                           slot_today + timedelta(seconds=7)]):
+        u = t.astimezone(timezone.utc)
+        with open(T.DIR / f"{u.date().isoformat()}.jsonl", "a") as f:
+            f.write(json.dumps({"ts": u.isoformat(timespec="seconds"), "run_id": f"r{i}", "job": "desk",
+                                "event": "run_start", "trigger": "launchd"}) + "\n")
+    seen = {}
+    monkeypatch.setattr(job, "analyze", lambda system, payload, model: seen.update(payload) or (None, "test"))
+    _run_monitor(job, [])
+    desk = seen["runs"]["desk"]
+    assert desk["unscheduled"] == [] and desk["missed"] == [] and len(desk["matched"]) == 1
 
 
 def test_runs_scheduled_before_telemetry_existed_are_not_called_missed(mon, monkeypatch):

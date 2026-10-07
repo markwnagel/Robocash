@@ -175,9 +175,14 @@ def main() -> None:
         # fire - 09-28 and 09-29 both read as covered, late, and raised nothing (monitor R-17).
         trig = {datetime.fromisoformat(e["ts"]).astimezone(): e.get("trigger", "launchd") for e in start_ev}
         m = match_runs(expected_runs(slots, since, now, grace), starts)
+        # Starts up to EARLY before `since` are read only so a run that fired a little early can match a slot in
+        # range. One that matched nothing belongs to the previous window, which judged it: since the desk moved
+        # to 13:40 (slot + 10 min grace = 13:50, minus EARLY = 13:40), every report listed the previous day's
+        # desk run as "unscheduled" (monitor F-28, 2026-10-06).
+        unscheduled = [t for t in m["unscheduled"] if t >= since]
         runs[job] = {"matched": [{**x, "slot": x["slot"].isoformat(), "started": x["started"].isoformat(),
                                   "covered_by": trig.get(x["started"])} for x in m["matched"]],
-                     "missed": m["missed"], "unscheduled": [s.isoformat() for s in m["unscheduled"]]}
+                     "missed": m["missed"], "unscheduled": [t.isoformat() for t in unscheduled]}
     audits = sorted(e["ts"] for e in history + window if e.get("event") == "run_start" and e.get("job") == "audit")
 
     jobs = job_signals(window, now)

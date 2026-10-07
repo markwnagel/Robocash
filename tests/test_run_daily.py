@@ -393,6 +393,10 @@ def test_an_entry_bought_and_stopped_out_between_runs_is_recorded_and_frees_its_
     assert ("entry_filled", "TXG") in kinds and ("position_closed", "TXG") in kinds
     assert ("TXG", OrderSide.SELL) in holder["broker"].cancelled      # the bracket's other leg, if any
     assert "1 staged" not in sent[-1]
+    from desk import telemetry
+    # Nothing held; what is pending is exactly what this run staged in the slot TXG freed.
+    assert telemetry._run["fields"]["positions"] == 0
+    assert telemetry._run["fields"]["positions_staged"] == len(holder["broker"].brackets) > 0
 
 
 def test_a_round_trip_whose_sale_is_not_readable_yet_is_closed_next_run(wired, cfg):
@@ -407,6 +411,8 @@ def test_a_round_trip_whose_sale_is_not_readable_yet_is_closed_next_run(wired, c
     run(["--no-analyst"])
     assert state_mod.load_state()["positions"]["TXG"]["filled"] is False
     assert "checked again next run" in sent[-1]
+    from desk import telemetry
+    assert telemetry._run["fields"]["positions_staged"] >= 1        # still pending: counted apart from holdings
     # Never protected while not held: a sell stop for shares the account does not own would open a short.
     assert not [x for x in holder["broker"].protected if x[0] == "TXG"]
     holder["broker"].sell_fills = {"TXG": 85.85}
