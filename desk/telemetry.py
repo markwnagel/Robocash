@@ -271,7 +271,8 @@ def run_job(job: str, fn) -> None:
 
 def usage_of(responses: list) -> dict:
     """Token counts summed over every response of one logical call (pause_turn continuations included)."""
-    tot = {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0, "cache_read_tokens": 0, "web_searches": 0}
+    tot = {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0, "cache_read_tokens": 0, "web_searches": 0,
+           "web_fetches": 0}
     for r in responses:
         u = getattr(r, "usage", None)
         if u is None:
@@ -282,7 +283,28 @@ def usage_of(responses: list) -> dict:
         tot["cache_read_tokens"] += int(getattr(u, "cache_read_input_tokens", 0) or 0)
         stu = getattr(u, "server_tool_use", None)
         tot["web_searches"] += int(getattr(stu, "web_search_requests", 0) or 0) if stu else 0
+        tot["web_fetches"] += int(getattr(stu, "web_fetch_requests", 0) or 0) if stu else 0
     return tot
+
+
+def server_tool_activity(responses: list) -> dict:
+    """What server-side tools put into a call's context, from the response content: block counts by type
+    (server tool calls by name) and the size of their results. On 2026-10-06 the analyst's input doubled to
+    54k tokens with an unchanged prompt and web_search_requests 0, and nothing recorded could say why."""
+    blocks, result_chars = {}, 0
+    for r in responses:
+        for b in getattr(r, "content", None) or []:
+            t = getattr(b, "type", None)
+            if t in (None, "text", "thinking", "redacted_thinking"):
+                continue
+            key = f"{t}:{getattr(b, 'name', '')}" if t == "server_tool_use" else t
+            blocks[key] = blocks.get(key, 0) + 1
+            if t.endswith("_tool_result"):
+                try:
+                    result_chars += len(json.dumps(b.model_dump(), default=str))
+                except Exception:
+                    pass
+    return {"server_blocks": blocks, "server_result_chars": result_chars}
 
 
 def cost_usd(model: str | None, u: dict) -> float | None:
@@ -305,7 +327,8 @@ def llm_call(role: str, model: str, started: float, responses: list | None = Non
     emit({"event": "llm_call", "role": role, "model": model, "served_by": served,
           "fallback": bool(last is not None and served != model), "outcome": outcome,
           "stop_reason": getattr(last, "stop_reason", None), "turns": len(responses),
-          "latency_s": round(time.monotonic() - started, 2), **u, "cost_usd": cost_usd(served, u),
+          "latency_s": round(time.monotonic() - started, 2), **u, **server_tool_activity(responses),
+          "cost_usd": cost_usd(served, u),
           "web_search_usd": round(u["web_searches"] * WEB_SEARCH_USD, 4),
           "error": redact(error)[:500] if error else None, **fields})
 

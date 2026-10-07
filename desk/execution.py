@@ -183,6 +183,16 @@ class Broker:
             log.warning("order %s fill unavailable: %s", order_id, e)
             return None, None
 
+    def entry_fill(self, order_id: str) -> dict:
+        """{status, qty, price, filled_at} for an entry order; empty values when it cannot be read."""
+        try:
+            o = self.t.get_order_by_id(order_id)
+            return {"status": o.status.value, "qty": float(o.filled_qty or 0),
+                    "price": float(o.filled_avg_price) if o.filled_avg_price else None, "filled_at": o.filled_at}
+        except Exception as e:
+            log.warning("order %s fill unavailable: %s", order_id, e)
+            return {"status": None, "qty": 0.0, "price": None, "filled_at": None}
+
     def last_sell_fill(self, symbol: str, since: date) -> float | None:
         orders = self.t.get_orders(GetOrdersRequest(
             status=QueryOrderStatus.CLOSED, symbols=[symbol],
@@ -265,8 +275,45 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
                              f"({type(e).__name__}) - cancel any at the broker, or a stop could open a short")
             del st[sym]
         else:
+            fill = broker.entry_fill(pos.get("order_id", "")) if not broker.dry_run else {"status": None}
+            status = fill["status"]
+            if fill.get("price") and fill.get("qty"):
+                # Bought and sold between two runs: the entry filled at the open and the bracket's stop (or
+                # target) sold it before this run, so the name was never seen held. It stayed a pending entry
+                # with a filled order - never dropped, holding a slot, its loss missing from the trade log
+                # (TXG, 2026-10-06: bought 98.18 at 09:51 ET, stopped 85.85 at 10:51 ET).
+                since = fill["filled_at"].date() if fill.get("filled_at") else entry
+                exit_price = None
+                try:
+                    exit_price = broker.last_sell_fill(sym, since)
+                except Exception as e:
+                    log.warning("last sell fill %s unavailable: %s", sym, e)
+                if exit_price is None:
+                    # Left as a pending entry, untouched, until the sale is readable. Marking it filled now would
+                    # send it through protect(), which would place a sell stop for shares the account does not
+                    # hold - on a margin account, an order that opens a short.
+                    notes.append(f"{sym} entry filled at {fill['price']:.2f} but is not held and its sale is not "
+                                 f"readable yet - checked again next run")
+                    continue
+                pos.update(filled=True, filled_date=today.isoformat(), entry_price=fill["price"], qty=fill["qty"])
+                telemetry.order_event("entry_filled", sym, order_id=pos.get("order_id"), staged=pos["entry_date"],
+                                      qty=fill["qty"], price=fill["price"])
+                reason = "bracket/stop/target (same day)"
+                _log_close(pos, sym, exit_price, today, reason)
+                telemetry.order_event("position_closed", sym, price=exit_price, qty=fill["qty"], reason=reason)
+                notes.append(f"{sym} bought at {fill['price']:.2f} and sold at {exit_price:.2f} before this run "
+                             f"({(exit_price / fill['price'] - 1):+.1%}, {fill['qty']:.0f} sh) - recorded as a closed trade")
+                try:
+                    n = broker.cancel_symbol_orders(sym, side=OrderSide.SELL)
+                    if n:
+                        notes.append(f"{sym}: {n} leftover sell order(s) cancelled - nothing is held to sell")
+                except Exception as e:
+                    log.warning("leftover orders for %s not cancelled: %s", sym, e)
+                    notes.append(f"MANUAL ACTION: {sym} is closed but its leftover sell orders could not be checked "
+                                 f"({type(e).__name__}) - cancel any at the broker, or a stop could open a short")
+                del st[sym]
+                continue
             # An unfilled DAY order that has expired must free its slot the same evening, not two days later.
-            status = broker.order_status(pos.get("order_id", "")) if not broker.dry_run else None
             dead = status in DEAD_ORDER_STATUSES or (status is None and (today - entry).days >= 2)
             if dead:
                 # Name the order: the same run can stage a new entry for the name, and on 2026-09-29 "MXL entry

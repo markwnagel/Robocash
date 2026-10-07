@@ -154,7 +154,11 @@ def main() -> None:
     publish(brief, today, cfg, args.dry_run)
     count = lambda text: sum(text in n for n in notes)  # noqa: E731
     telemetry.note(entries=len(entries), exits=len(exits), adds=len(adds), notes=len(notes), stale=plan["stale"],
-                   analyst=plan["analyst_status"], positions=len(st["positions"]), equity=round(acct["equity"], 2),
+                   analyst=plan["analyst_status"], equity=round(acct["equity"], 2),
+                   # Held and staged apart, counted as the brief counts them: one "positions" number that included
+                   # pending entries read as 12 beside a brief saying "11 + 1 staged" (monitor F-21, 2026-10-06).
+                   positions=sum(1 for p in st["positions"].values() if p.get("filled", True)),
+                   positions_staged=sum(1 for p in st["positions"].values() if not p.get("filled", True)),
                    manual_actions=count("MANUAL ACTION"), cap_breaches=count("% cap - sell"),
                    unprotected=count(NO_STOP), protection_unverified=count("protection UNVERIFIED"),
                    protection_replaced=count("protective stop re-placed"), order_errors=count("ORDER FAILED"),

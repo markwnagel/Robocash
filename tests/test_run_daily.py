@@ -29,6 +29,8 @@ class FakeBroker:
         self.query_fails = False
         self.session_open = False    # the scheduled run is after the close
         self.cancelled = []          # (symbol, side) leftover-order sweeps
+        self.entry_fills = {}        # order_id -> (qty, price): an entry that filled
+        self.sell_fills = {}         # symbol -> price of its latest filled sell
 
     def live_exit_orders(self, symbol):
         if self.query_fails:
@@ -49,6 +51,10 @@ class FakeBroker:
 
     def order_status(self, order_id):
         return self.statuses.get(order_id)
+
+    def entry_fill(self, order_id):
+        qty, px = self.entry_fills.get(order_id, (0.0, None))
+        return {"status": self.statuses.get(order_id), "qty": qty, "price": px, "filled_at": None}
 
     def account(self):
         return dict(self._acct)
@@ -76,7 +82,7 @@ class FakeBroker:
         return f"oid-{symbol}"
 
     def last_sell_fill(self, symbol, since):
-        return None
+        return self.sell_fills.get(symbol)
 
 
 @pytest.fixture
@@ -361,6 +367,59 @@ def test_expired_entry_order_frees_its_slot(wired, cfg):
     assert ("entry_expired", "S05") in orders and ("entry_expired", "S06") not in orders
     staged = {s for k, s in orders if k == "entry_staged"}
     assert staged == {s for s, *_ in holder["broker"].brackets}      # every order placed is on record
+
+
+def test_an_entry_bought_and_stopped_out_between_runs_is_recorded_and_frees_its_slot(wired, cfg):
+    """TXG 2026-10-06: staged 10-05, bought 98.18 at the open, stopped 85.85 an hour later. The desk never saw
+    it held, kept it as a pending entry for good (a filled order is not "dead"), held its slot so no new
+    entry could be bought, and left the loss out of the trade log."""
+    holder, sent = wired
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    state_mod.save_state({**state_mod.load_state(), "positions": {
+        "TXG": {"entry_date": yesterday, "entry_price": 97.74, "qty": 3, "stop": 85.83, "target": 133.47,
+                "filled": False, "order_id": "o-txg", "thesis": "t"}}})
+    holder["broker"] = FakeBroker()
+    holder["broker"].statuses = {"o-txg": "filled"}
+    holder["broker"].entry_fills = {"o-txg": (3.0, 98.18)}
+    holder["broker"].sell_fills = {"TXG": 85.85}
+    run(["--no-analyst"])
+    st = state_mod.load_state()
+    assert "TXG" not in st["positions"]
+    assert "TXG bought at 98.18 and sold at 85.85 before this run (-12.6%, 3 sh)" in sent[-1]
+    trades = pd.read_csv(state_mod.TRADES_FILE)
+    row = trades[trades.symbol == "TXG"].iloc[0]
+    assert row.entry_price == 98.18 and row.exit_price == 85.85 and abs(row.pnl - (85.85 - 98.18) * 3) < 1e-6
+    kinds = [(e["kind"], e["symbol"]) for e in _telemetry_events() if e["event"] == "order"]
+    assert ("entry_filled", "TXG") in kinds and ("position_closed", "TXG") in kinds
+    assert ("TXG", OrderSide.SELL) in holder["broker"].cancelled      # the bracket's other leg, if any
+    assert "1 staged" not in sent[-1]
+    from desk import telemetry
+    # Nothing held; what is pending is exactly what this run staged in the slot TXG freed.
+    assert telemetry._run["fields"]["positions"] == 0
+    assert telemetry._run["fields"]["positions_staged"] == len(holder["broker"].brackets) > 0
+
+
+def test_a_round_trip_whose_sale_is_not_readable_yet_is_closed_next_run(wired, cfg):
+    holder, sent = wired
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    state_mod.save_state({**state_mod.load_state(), "positions": {
+        "TXG": {"entry_date": yesterday, "entry_price": 97.74, "qty": 3, "stop": 85.83, "target": 133.47,
+                "filled": False, "order_id": "o-txg", "thesis": "t"}}})
+    holder["broker"] = FakeBroker()
+    holder["broker"].statuses = {"o-txg": "filled"}
+    holder["broker"].entry_fills = {"o-txg": (3.0, 98.18)}
+    run(["--no-analyst"])
+    assert state_mod.load_state()["positions"]["TXG"]["filled"] is False
+    assert "checked again next run" in sent[-1]
+    from desk import telemetry
+    assert telemetry._run["fields"]["positions_staged"] >= 1        # still pending: counted apart from holdings
+    # Never protected while not held: a sell stop for shares the account does not own would open a short.
+    assert not [x for x in holder["broker"].protected if x[0] == "TXG"]
+    holder["broker"].sell_fills = {"TXG": 85.85}
+    run(["--no-analyst"])
+    assert "TXG" not in state_mod.load_state()["positions"]
+    assert "TXG bought at 98.18 and sold at 85.85 before this run" in sent[-1]
+    assert not [x for x in holder["broker"].protected if x[0] == "TXG"]
 
 
 def test_a_fill_is_recorded_once_with_the_order_it_came_from(wired, cfg):
