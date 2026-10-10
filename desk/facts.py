@@ -21,7 +21,7 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import NewsRequest, OptionChainRequest
 
 from . import telemetry
-from .edgar import Edgar, offering_filings, recent_8k_items, shelf_filings
+from .edgar import Edgar, offering_filings, recent_8k_items, shelf_filings, standing_shelf
 from .state import atomic_write_text
 
 log = logging.getLogger("desk.facts")
@@ -79,19 +79,38 @@ _NAME_NOISE = re.compile(r"\b(inc|incorporated|corp|corporation|co|company|holdi
 _GENERIC = {"advanced", "american", "united", "first", "general", "global", "international", "national", "new"}
 
 
+def _plain(text: str, possessive: bool = False) -> str:
+    """Lower case, periods and apostrophes dropped, other punctuation as spaces: "e.l.f. Beauty" -> "elf beauty",
+    "Victoria's Secret" -> "victorias secret", so a name matches however a headline punctuates it.
+    possessive=True also drops a trailing 's ("Intel's" -> "intel")."""
+    t = text.lower()
+    if possessive:
+        t = re.sub(r"['\u2019]s\b", "", t)
+    t = re.sub(r"[.'\u2019]", "", t)
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", t)).strip()
+
+
 def headline_is_about(symbol: str, company: str | None, headline: str, tagged: list | None) -> bool:
     """Roundup articles are tagged with every ticker they mention, so a feed filtered by symbol returns
-    other companies' news (Broadcom headlines under INTC, 2026-09-23). Keep a headline only when the article
-    is tagged to this symbol alone, or the headline names the ticker or the company."""
-    if tagged is not None and len(tagged) == 1:
-        return True
+    other companies' news (Broadcom headlines under INTC, 2026-09-23). Keep a headline only when it names the
+    ticker or the company. A tag to this symbol alone is trusted only when the company name is unknown: the
+    publisher tagged an IRS "Trump Accounts" story to DELL alone, and it was counted in DELL's news for a week
+    (monitor F-30, 2026-10-09). Of 862 kept headlines that week, it was the only one the tag alone let in once
+    names are compared without punctuation."""
     if re.search(rf"(?<![A-Za-z]){re.escape(symbol)}(?![A-Za-z])", headline):
         return True
-    name = re.sub(r"\s+", " ", _NAME_NOISE.sub(" ", re.sub(r"[,.()]", " ", company or ""))).strip()
-    if len(name) >= 3 and name.lower() in headline.lower():
+    if not company:
+        return tagged is not None and len(tagged) == 1
+    name = _plain(_NAME_NOISE.sub(" ", company))
+    # Both readings of an apostrophe: "Intel's" is Intel's, "Victoria's Secret" is the company Alpaca spells
+    # "Victorias Secret".
+    plain = f" {_plain(headline)} {_plain(headline, possessive=True)} "
+    if len(name) >= 3 and f" {name} " in plain:
         return True
     first = name.split(" ")[0] if name else ""
-    return len(first) >= 4 and first.lower() not in _GENERIC and re.search(rf"\b{re.escape(first)}\b", headline, re.I) is not None
+    # A dotted abbreviation ("e.l.f.") is distinctive however short; other short first words are not.
+    dotted = re.match(r"^\s*(?:[A-Za-z]\.){2,}", company) is not None
+    return (len(first) >= 4 or dotted) and first not in _GENERIC and f" {first} " in plain
 
 
 def filter_insider(transactions: list, spot: float | None, max_abs_usd: float, price_band: float) -> dict:
@@ -223,20 +242,25 @@ def classify_headlines(by_symbol: dict, model: str) -> dict:
     if not payload:
         return {}
     started, resp = time.monotonic(), None
+    user_text = json.dumps(payload)
+    # The prompt-size fields the analyst and red team log, so a token move can be split into more names, more
+    # headlines or something else (monitor F-32, 2026-10-09).
+    comp = {"prompt_symbols": len(payload), "input_chars": len(user_text),
+            "prompt_headlines": sum(len(v) for v in payload.values())}
     try:
         client = anthropic.Anthropic()
         resp = client.messages.create(
             model=model, max_tokens=16000, system=CLASSIFIER_SYSTEM,
-            messages=[{"role": "user", "content": json.dumps(payload)}],
+            messages=[{"role": "user", "content": user_text}],
             output_config={"format": {"type": "json_schema", "schema": CLASSIFIER_SCHEMA}},
         )
         if resp.stop_reason == "refusal":
-            telemetry.llm_call("classifier", model, started, [resp], outcome="refusal")
+            telemetry.llm_call("classifier", model, started, [resp], outcome="refusal", **comp)
             telemetry.agent_output("classifier", len(payload), None)
             return {}
         text = "".join(b.text for b in resp.content if b.type == "text")
         out = {r["symbol"].upper(): r for r in json.loads(text)["results"]}
-        telemetry.llm_call("classifier", model, started, [resp])
+        telemetry.llm_call("classifier", model, started, [resp], **comp)
         telemetry.agent_output("classifier", len(payload), len(set(out) & set(payload)),
                                unrequested=sorted(set(out) - set(payload))[:10],
                                flagged=sum(1 for r in out.values() if r.get("offering") or r.get("guidance_cut")
@@ -245,7 +269,7 @@ def classify_headlines(by_symbol: dict, model: str) -> dict:
     except Exception as e:  # classification is optional; raw headlines still reach the analyst
         log.warning("headline classifier failed: %s", e)
         telemetry.llm_call("classifier", model, started, [resp], outcome="error" if resp is None else "parse_error",
-                           error=f"{type(e).__name__}: {e}")
+                           error=f"{type(e).__name__}: {e}", **comp)
         telemetry.agent_output("classifier", len(payload), None)
         return {}
 
@@ -446,7 +470,8 @@ class FactBuilder:
     def _edgar(self, s: str, spot: float | None = None) -> dict:
         out = {"cik": None, "offering_filings": [], "shelf_filings": [], "insider_net_buy_30d": None,
                "insider_net_buy_90d": None, "insider_transactions_90d": None, "insider_excluded_n": 0,
-               "insider_note": None, "recent_8k_items": []}
+               "insider_note": None, "recent_8k_items": [], "shelf_registration": None,
+               "prospectus_supplements_12m": [], "prospectus_supplements_12m_n": 0}
         if not self.edgar:
             return out
         try:
@@ -458,6 +483,8 @@ class FactBuilder:
             out["offering_filings"] = offering_filings(filings)
             out["shelf_filings"] = shelf_filings(filings)
             out["recent_8k_items"] = recent_8k_items([f for f in filings if f["date"] >= self.today - timedelta(days=30)])[:6]
+            # The same submissions file, read further back (no extra request: it is cached for 12 hours).
+            out.update(standing_shelf(self.edgar.filings(cik, self.today - timedelta(days=3 * 365)), self.today))
             if any(f["form"] in FOREIGN_ISSUER_FORMS for f in filings):
                 # A foreign private issuer's insiders are exempt from Section 16: stray Form 4 rows (UMC's were
                 # priced in TWD) are not a signal, and "unavailable" read as a data failure every day.

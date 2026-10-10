@@ -205,7 +205,16 @@ def test_roundup_headlines_about_other_companies_are_dropped():
                                  "Broadcom, Melania Trump And Other Big Stocks Moving Higher", ["AVGO", "INTC", "QCOM"])
     assert headline_is_about("INTC", "Intel Corporation Common Stock", "Intel wins foundry deal", ["INTC", "AAPL"])
     assert headline_is_about("INTC", None, "Why INTC shares are rising", ["INTC", "NVDA"])
-    assert headline_is_about("INTC", None, "Chipmaker beats estimates", ["INTC"])          # tagged to it alone
+    assert headline_is_about("INTC", None, "Chipmaker beats estimates", ["INTC"])  # tagged alone, name unknown
+    # Tagged to DELL alone but about something else (2026-10-02..09, monitor F-30): a known name must appear.
+    assert not headline_is_about("DELL", "Dell Technologies Inc.",
+                                 "IRS Chief Frank Bisignano Says Trump Accounts Could Reach 70 Million", ["DELL"])
+    # Names match however the headline punctuates them.
+    assert headline_is_about("ELF", "e.l.f. Beauty, Inc.", "Baird Maintains Outperform on e.l.f. Beauty", ["ELF"])
+    assert headline_is_about("ELF", "e.l.f. Beauty, Inc.", "e.l.f. Steps Into Fragrance And Body Care", ["ELF"])
+    assert headline_is_about("VSXY", "Victorias Secret & Co.", "Wells Fargo Maintains Overweight on Victoria's Secret", ["VSXY"])
+    assert headline_is_about("INTC", "Intel Corporation Common Stock", "Why TSMC\u2019s Talks Threaten Intel\u2019s Chip Ambitions", ["INTC"])
+    assert headline_is_about("MU", "Micron Technology, Inc. Common Stock", "Micron's Record Quarter Points to Tighter Supply", ["MU"])
     # A generic first word must not match everyone's headlines.
     assert not headline_is_about("AMD", "Advanced Micro Devices, Inc.", "Advanced packaging demand soars", ["TSM", "AMD"])
     assert headline_is_about("AMD", "Advanced Micro Devices, Inc.", "Advanced Micro Devices raises guidance", ["AMD", "NVDA"])
@@ -230,6 +239,25 @@ def _fb_with_edgar(tmp_path, transactions):
             return {"transactions": transactions}
     fb.edgar = Ed()
     return fb
+
+
+def test_a_standing_shelf_and_atm_supplements_reach_the_fact_sheet(tmp_path):
+    """ASST 2026-10-09: S-3ASR 2025-09-15 and 424B5s on 2026-06-05/08, all outside the 90-day window, so the
+    fact sheet said no shelf and the red team found the ATM on the web instead (monitor F-31)."""
+    from datetime import date
+    from desk.edgar import standing_shelf
+    fs = [{"form": "S-3ASR", "date": date(2025, 9, 15)}, {"form": "424B5", "date": date(2026, 6, 8)},
+          {"form": "424B5", "date": date(2026, 6, 5)}, {"form": "424B5", "date": date(2025, 1, 29)},   # > 12 months
+          {"form": "S-1", "date": date(2024, 6, 7)}, {"form": "S-3", "date": date(2023, 4, 16)}]       # > 3 years
+    out = standing_shelf(fs, date(2026, 10, 9))
+    assert out == {"shelf_registration": "S-3ASR 2025-09-15", "prospectus_supplements_12m": ["424B5 2026-06-08", "424B5 2026-06-05"],
+                   "prospectus_supplements_12m_n": 2}
+    fb = _fb_with_edgar(tmp_path, [])
+    fb.today = date(2026, 10, 9)
+    fb.edgar.filings = lambda cik, since: [f for f in fs if f["date"] >= since]
+    sheet = fb._edgar("ASST", spot=28.0)
+    assert sheet["shelf_filings"] == [] and sheet["shelf_registration"] == "S-3ASR 2025-09-15"
+    assert sheet["prospectus_supplements_12m_n"] == 2
 
 
 def test_an_insider_feed_with_every_row_excluded_is_unknown_not_zero(tmp_path):
@@ -367,3 +395,22 @@ def test_a_screen_of_every_listed_stock_does_not_retry_or_warn_for_halted_names(
     assert len(calls) == 1 and not [r for r in caplog.records if r.levelno >= logging.WARNING]
     D.fetch_daily_bars(Client(), ["AAA", "SVA"], 30)                  # a holdings fetch still retries
     assert calls[-1] == ["SVA"]
+
+
+def test_the_classifier_logs_how_much_it_was_given(monkeypatch):
+    """Its input tokens moved +14% on 10-09 and nothing said whether it was given more names or headlines (F-32)."""
+    import json as _json
+    from datetime import datetime, timezone
+    from types import SimpleNamespace as NS
+    from desk import facts as F
+    from desk import telemetry as T
+    out = {"results": [{"symbol": "AAA", "sentiment": 0.1, "offering": False, "guidance_cut": False,
+                        "acquisition_target": False, "legal_regulatory": False, "note": "n"}]}
+    resp = NS(model="claude-opus-5", stop_reason="end_turn", content=[NS(type="text", text=_json.dumps(out))],
+              usage=NS(input_tokens=100, output_tokens=10, cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                       server_tool_use=None))
+    monkeypatch.setattr(F.anthropic, "Anthropic", lambda: NS(messages=NS(create=lambda **k: resp)))
+    F.classify_headlines({"AAA": [{"headline": "A1"}, {"headline": "A2"}], "BBB": [{"headline": "B1"}]}, "claude-opus-5")
+    e = [x for x in T.load_events(datetime(2000, 1, 1, tzinfo=timezone.utc), datetime(2100, 1, 1, tzinfo=timezone.utc))
+         if x["event"] == "llm_call"][-1]
+    assert e["role"] == "classifier" and e["prompt_symbols"] == 2 and e["prompt_headlines"] == 3 and e["input_chars"] > 0

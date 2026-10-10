@@ -180,6 +180,24 @@ def test_an_uncited_bear_case_cannot_carry_a_veto_level_severity(monkeypatch):
     assert cases["TWST"]["severity"] == 0.7                          # cited: untouched
 
 
+def test_a_bear_case_resting_only_on_web_pages_is_capped_below_veto_level(monkeypatch):
+    """10-08: the strongest GTLB/DDOG case was a year-old, unconfirmed bid report found on the web (F-31)."""
+    from desk import analyst
+    payload = {"holdings": [], "candidates": [{"symbol": s, "facts": {}} for s in ("GTLB", "ASST", "CORT")]}
+    monkeypatch.setattr(analyst, "_call_json", lambda *a, **k: {"cases": [
+        {"symbol": "GTLB", "bear_case": "Bid talk caps upside.", "trap_type": "other", "severity": 0.7,
+         "evidence": "web: reuters.com, 2025-09-30; web: bloomberg.com, 2025-10-01"},
+        {"symbol": "ASST", "bear_case": "ATM selling.", "trap_type": "dilution", "severity": 0.7,
+         "evidence": "prospectus_supplements_12m: 424B5 2026-06-08; web: strive.com, 2026-10-01"},
+        {"symbol": "CORT", "bear_case": "Minor.", "trap_type": "other", "severity": 0.4, "evidence": "web: x.com, 2026-10-01"}]})
+    cases = analyst.red_team(payload, {"analyst": {"model": "m", "red_team_max_web_searches": 0}})
+    assert cases["GTLB"]["severity"] == analyst.WEB_ONLY_SEVERITY_CAP and "web sources only" in cases["GTLB"]["bear_case"]
+    assert cases["ASST"]["severity"] == 0.7                     # a fact-sheet field beside the web page: untouched
+    assert cases["CORT"]["severity"] == 0.4                     # already below the cap
+    assert analyst.web_only("web: a; web: b") and not analyst.web_only("shelf_filings: S-3 2026-01-01; web: a")
+    assert not analyst.web_only("none") and not analyst.web_only("")
+
+
 def test_the_ai_roles_are_told_the_desk_s_own_earnings_rule(cfg):
     # The analyst was told to veto "an earnings report inside the hold window", which is a 60-day block - the
     # setting the backtest rejected (MXL vetoed at 26 days out, 2026-09-25). Code blocks within the configured

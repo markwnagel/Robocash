@@ -150,5 +150,23 @@ def shelf_filings(filings: list) -> list:
     return [f"{f['form']} {f['date'].isoformat()}" for f in filings if f["form"] in SHELF_FORMS]
 
 
+REGISTRATION_FORMS = {"S-3", "S-3/A", "S-3ASR", "F-3", "F-3ASR"}
+SUPPLEMENT_FORMS = {"424B2", "424B3", "424B5", "424B7"}
+
+
+def standing_shelf(filings: list, today: date) -> dict:
+    """An issuer's standing ability to sell shares, which a 90-day window misses: a shelf registration lasts
+    three years, and an at-the-market program sells under a prospectus supplement filed once, with no further
+    filing per sale. ASST on 2026-10-09 had an S-3ASR (2025-09-15) and 424B5s (2026-06-05, 06-08), and the
+    fact sheet said no shelf - the red team found the ATM on the web instead (monitor F-31)."""
+    regs = sorted((f for f in filings if f["form"] in REGISTRATION_FORMS and (today - f["date"]).days <= 3 * 365),
+                  key=lambda f: f["date"], reverse=True)
+    sups = sorted((f for f in filings if f["form"] in SUPPLEMENT_FORMS and (today - f["date"]).days <= 365),
+                  key=lambda f: f["date"], reverse=True)
+    return {"shelf_registration": f"{regs[0]['form']} {regs[0]['date'].isoformat()}" if regs else None,
+            "prospectus_supplements_12m": [f"{f['form']} {f['date'].isoformat()}" for f in sups[:5]],
+            "prospectus_supplements_12m_n": len(sups)}
+
+
 def recent_8k_items(filings: list) -> list:
     return [f"{f['date'].isoformat()}: {f['items']}" for f in filings if f["form"] in ("8-K", "8-K/A") and f["items"]]
