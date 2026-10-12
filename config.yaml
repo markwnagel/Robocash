@@ -72,7 +72,16 @@ portfolio:
   vol_weighting: true       # notional sizing only
 
 exits:
-  stop_atr_multiple: 2.0
+  stop_atr_multiple: 2.0         # 2.5 proposed by the 2026-10-10 audit (7 of 8 live exits were stops, ~9-day hold).
+                                 # Already tested: point-in-time 2018-26, 4 starts (state/robustness/2026-09-24):
+                                 # 2.5 = 3.0%/yr median vs 4.9%, worse return in 4/4, drawdown better in 3/4;
+                                 # 1.5 worse on both. Fails the audit's own bar (return better in >=3/4). Kept.
+                                 # Untested: 2.5 paired with a 2.5R target (same target distance).
+  # No re-entry cooldown. The 2026-10-10 audit proposed 5 trading days after TXG was re-bought the morning after
+  # its target fill and stopped out (-$37). In the backtests the trades a cooldown would block are better than
+  # average: re-buys within 5 trading days of an exit averaged +0.91% vs +0.66% for all trades (247 of 1,667,
+  # $2,050 of $7,919 profit) point-in-time 2018-26, and +1.84% vs +1.56% on the frozen 800. The audit's bar was
+  # a blocked set with negative mean P&L. Rejected. (Counts blocked trades; not a re-run with the slots refilled.)
   take_profit_r_multiple: 3.0    # 0 = no take-profit leg (pair with trail_atr_multiple > 0)
   trail_atr_multiple: 0          # >0: each evening raise the stop to (highest close since entry - this x ATR),
                                  # never lower, and replace the broker-side stop. Backtested 2026-09-12 (3y):
@@ -153,7 +162,9 @@ audit:
   email: true                  # Saturdays: email the finished audit to report.to (one per audit; audit.py
                                # --email-saved resends a saved one). The report is also in state/audits/
   model: claude-opus-5
-  lookback_days: 45
+  lookback_days: 90            # was 45 until 2026-10-10: at ~10 closed trades per 45 days, trades left the window
+                               # about as fast as their post-exit returns matured, so those fields stayed empty.
+                               # Measurement only; recent_trades in the prompt is already capped at 40
   post_exit_days: [10, 20]     # trading days after each exit. 20 alone left every field empty for the first month
                                # live (audit 2026-10-03); on ~700 backtest stop-outs 10d and 20d rank trades with
                                # Spearman 0.71, so both are reported rather than one replacing the other
