@@ -174,6 +174,25 @@ def test_a_call_records_what_server_tools_added_to_its_context():
     assert e["server_result_chars"] > 500
 
 
+def test_the_monitor_gets_numbers_for_the_headline_filter_and_the_web_cap():
+    """R-38: both fixes were being verified from the analyst's wording in the brief."""
+    from datetime import date
+    from desk.analyst import web_citation_stats
+    w = web_citation_stats(["web: reuters.com, 2025-10-01; shelf_registration: S-3ASR 2025-09-15", "web: strive.com",
+                            "none", "web: bloomberg.com, 2026-10-05"], today=date(2026, 10, 12))
+    assert w == {"web_citations": 3, "web_citations_dated": 2, "web_citation_max_age_days": 376}
+    ev = [{"event": "agent_output", "role": "red_team", "requested": 12, "returned": 12, "web_only_capped": 1,
+           "high_severity": 0, **w},
+          {"event": "feed_quality", "feed": "news", "symbol": "DELL", "kept": 6, "dropped_unrelated": 5},
+          {"event": "feed_quality", "feed": "news", "symbol": "INTC", "kept": 8, "dropped_unrelated": 2},
+          {"event": "feed_quality", "feed": "news", "symbol": "UMC", "kept": 1, "dropped_unrelated": 0}]
+    rt = M.role_signals(ev)["red_team"]
+    assert rt["contract"]["web_only_capped"] == 1 and rt["contract"]["web_citations_dated"] == 2
+    assert rt["web_citation_max_age_days"] == 376
+    assert M.feed_signals(ev) == {"news": {"symbols": 3, "kept": 15, "dropped_unrelated": 7,
+                                           "most_dropped": [["DELL", 5], ["INTC", 2]]}}
+
+
 def test_role_signals_separate_prompt_growth_from_search_results():
     """10-02: the red team's input tokens "doubled" and the monitor could not say why, though each call
     recorded its prompt size and search count. Flat prompt, tokens by search count: search results (F-19)."""

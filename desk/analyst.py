@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+from datetime import date
 import time
 
 import anthropic
@@ -40,6 +41,24 @@ UNCITED_SEVERITY_CAP = 0.3
 # year-old unconfirmed bid report for GTLB/DDOG among them (monitor F-31, 2026-10-08/09). Below the 0.7 that
 # reads as high severity, above the uncited cap.
 WEB_ONLY_SEVERITY_CAP = 0.5
+
+
+def web_citation_stats(evidences: list, today: date | None = None) -> dict:
+    """How the red team cited the web across its cases: citations, how many carry a date, and the age of the
+    oldest dated one. Numbers the monitor can check, where it had only the analyst's prose (R-38)."""
+    today = today or date.today()
+    parts = [p.strip() for ev in evidences for p in re.split(r"[;|]", ev or "") if p.strip().lower().startswith("web:")]
+    ages = []
+    for p in parts:
+        m = re.search(r"(20\d{2})-(\d{2})-(\d{2})", p)
+        if m:
+            try:
+                ages.append((today - date(int(m.group(1)), int(m.group(2)), int(m.group(3)))).days)
+            except ValueError:
+                pass
+    return {"web_citations": len(parts),
+            "web_citations_dated": sum(1 for p in parts if re.search(r"\b(19|20)\d{2}\b", p)),
+            "web_citation_max_age_days": max(ages) if ages else None}
 
 
 def web_only(evidence: str) -> bool:
@@ -245,7 +264,8 @@ def red_team(payload: dict, cfg: dict) -> dict:
                            severity_out_of_range=sum(1 for x in sev if not 0 <= x <= 1),
                            severity_median=sorted(sev)[len(sev) // 2] if sev else None,
                            high_severity=sum(1 for x in sev if x >= 0.7), crowded_unsupported=unsupported,
-                           web_only_capped=web_capped)
+                           web_only_capped=web_capped,
+                           **web_citation_stats([str(c.get("evidence") or "") for c in cases.values()]))
     return cases
 
 

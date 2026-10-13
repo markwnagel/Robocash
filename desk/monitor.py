@@ -66,6 +66,24 @@ def commits_since(root, since) -> list:
     return [{"sha": a, "date": d, "subject": subj} for a, d, subj in rows]
 
 
+def feed_signals(events: list) -> dict:
+    """Per data feed: how many items were kept and how many dropped as unrelated, and which symbols lost the
+    most. The headline filter's effect as numbers, where the monitor had only the brief's wording (R-38)."""
+    out = {}
+    for e in events:
+        if e.get("event") != "feed_quality":
+            continue
+        f = out.setdefault(e.get("feed", "?"), {"symbols": 0, "kept": 0, "dropped_unrelated": 0, "_by": {}})
+        f["symbols"] += 1
+        f["kept"] += int(e.get("kept") or 0)
+        f["dropped_unrelated"] += int(e.get("dropped_unrelated") or 0)
+        f["_by"][e.get("symbol")] = f["_by"].get(e.get("symbol"), 0) + int(e.get("dropped_unrelated") or 0)
+    for f in out.values():
+        by = f.pop("_by")
+        f["most_dropped"] = [[s, n] for s, n in sorted(by.items(), key=lambda x: -x[1])[:5] if n]
+    return out
+
+
 def role_signals(events: list) -> dict:
     """Golden signals per LLM role: rate, errors, duration, tokens and cost, plus output-contract checks."""
     calls, outputs = defaultdict(list), defaultdict(list)
@@ -109,9 +127,15 @@ def role_signals(events: list) -> dict:
             "max_turns": max((x.get("turns") or 0 for x in c), default=0),
             "outputs": len(o), "no_answer": sum(1 for x in o if x.get("returned") is None),
             "coverage": round(ret / req, 3) if req else None,
+            # Every counter a role reports about its own output. web_only_capped was emitted from 2026-10-09 but not
+            # listed here, so the monitor could not see the fix it was verifying (R-38).
             "contract": {k: sum(x.get(k) or 0 for x in o)
-                         for k in ("brief_over_limit", "severity_out_of_range", "fell_back", "trimmed_for_length")
+                         for k in ("brief_over_limit", "severity_out_of_range", "fell_back", "trimmed_for_length",
+                                   "high_severity", "crowded_unsupported", "web_only_capped", "web_citations",
+                                   "web_citations_dated", "flagged")
                          if any(k in x for x in o)},
+            "web_citation_max_age_days": max((x["web_citation_max_age_days"] for x in o
+                                              if x.get("web_citation_max_age_days") is not None), default=None),
             "unrequested_examples": sorted({s for x in o for s in (x.get("unrequested") or [])})[:10],
             "missing_examples": sorted({s for x in o for s in (x.get("missing") or [])})[:10],
             "errors": [x.get("error") for x in c if x.get("error")][:3],

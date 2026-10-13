@@ -27,7 +27,7 @@ from desk import schedule
 from desk.monitor import (coverage_alarms, MONITOR_SCHEMA, baseline_view, brief_signatures, build_system_prompt, compare_roles,
                           expected_runs, fallback_report, hard_alarms, job_signals, log_signatures, match_runs,
                           render_config, role_signals, schedule_slots, summary_for_email,
-                          commits_since)
+                          commits_since, feed_signals)
 from desk.notify import send_email
 from desk.report import diff_fingerprint, fingerprint, load_json
 from desk.state import STATE_DIR, atomic_write_text
@@ -242,6 +242,7 @@ def main() -> None:
         "runs": runs, "jobs": jobs,
         "audit_last_run": audits[-1] if audits else None,
         "signals": role_signals(window),
+        "feeds": feed_signals(window), "baseline_feeds": feed_signals(base["events"]),
         "baseline_signals": role_signals(base["events"]),
         "vs_baseline": compare_roles(role_signals(window), role_signals(base["events"])),
         "log_signatures": log_signatures(window, base["events"]),
