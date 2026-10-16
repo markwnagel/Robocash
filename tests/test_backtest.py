@@ -272,3 +272,32 @@ def test_simulated_vetoes_only_ever_shrink_or_drop_entries(cfg, panel):
     first = base.iloc[0]
     same = halved[(halved.symbol == first.symbol) & (halved.entry_date == first.entry_date)]
     assert len(same) == 1 and same.iloc[0].qty == max(1, int(first.qty * 0.5))
+
+
+def _exits(cfg, **kw):
+    return dict(cfg, exits=dict(cfg["exits"], **kw))
+
+
+def test_a_stop_on_the_close_sells_at_the_next_open_and_only_after_a_close_below_it(cfg, panel):
+    """Backtest-only variant (scripts/check_stop_variants.py): an intraday dip through the stop that closes
+    above it keeps the holding; a close at or below it sells at the next session's open."""
+    dates = panel["close"].index
+    c2 = _exits(cfg, stop_on="close")
+    _, trades = run_backtest(panel, c2, dates[0], dates[-1], 10000.0, 10, 5)
+    stops = trades[trades.reason.str.startswith("stop")]
+    assert len(stops) and set(stops.reason) == {"stop-close"}
+    for t in stops.itertuples():
+        i = dates.get_loc(pd.Timestamp(t.exit_date))
+        assert panel["close"].loc[dates[i - 1], t.symbol] <= t.final_stop
+        assert abs(t.exit_price - panel["open"].loc[dates[i], t.symbol] * (1 - 10 / 10000)) < 1e-9
+
+
+def test_the_resting_disaster_stop_still_fires_intraday_under_a_close_stop(cfg, panel):
+    dates = panel["close"].index
+    _, trades = run_backtest(panel, _exits(cfg, stop_on="close", disaster_atr_multiple=2.5), dates[0], dates[-1],
+                             10000.0, 10, 5)
+    _, none = run_backtest(panel, _exits(cfg, stop_on="close"), dates[0], dates[-1], 10000.0, 10, 5)
+    assert not set(none.reason) & {"stop", "stop-gap"}
+    assert set(trades.reason) & {"stop", "stop-gap"}
+    _, default = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    assert "stop-close" not in set(default.reason)

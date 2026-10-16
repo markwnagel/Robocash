@@ -122,6 +122,11 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
     trim_above = float(pcfg.get("trim_above_pct") or 0)
     trim_to = float(pcfg.get("trim_to_pct") or pcfg["max_position_pct"])
     tp_r = float(ecfg.get("take_profit_r_multiple") or 0)
+    # Backtest-only stop variants (not in config.yaml; set by scripts/check_stop_variants.py). "close": the stop
+    # is not a resting order - a close at or below it sells at the next open, the first price a desk that runs
+    # after the close can get. disaster_atr_multiple > 0 keeps a wider resting stop under it for crashes.
+    stop_on_close = ecfg.get("stop_on", "intraday") == "close"
+    disaster_mult = float(ecfg.get("disaster_atr_multiple") or 0)
 
     def sell(sym, qty, px, d, reason):
         """Sell `qty` shares of a holding: all of them closes it, fewer is a trim that leaves the rest open with
@@ -190,6 +195,8 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             positions[sym] = {"qty": qty, "entry_price": fill, "entry_date": d, "stop": stop, "target": target,
                               "intended_risk": e.get("intended_risk"), "realized_risk": qty * (fill - stop),
                               "high_close": fill, "adds": 0, "last_add_price": fill, "initial_risk_per_share": fill - stop}
+            if disaster_mult > 0:
+                positions[sym]["disaster"] = round(fill - disaster_mult * e["atr"], 2)
         pending = []
 
         for sym in list(positions):
@@ -205,6 +212,23 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                     close_pos(sym, last(sym) * (1 - slip), d, "delisted")
                 continue
             p["missing"] = 0
+            if stop_on_close:
+                hard = p.get("disaster")
+                if p.get("stop_closed_below"):
+                    close_pos(sym, o * (1 - slip), d, "stop-close")
+                elif hard is not None and o <= hard:
+                    close_pos(sym, o * (1 - slip), d, "stop-gap")
+                elif hard is not None and l <= hard:
+                    close_pos(sym, hard * (1 - slip), d, "stop")
+                elif p["target"] is not None and o >= p["target"]:
+                    close_pos(sym, o, d, "target-gap")
+                elif p["target"] is not None and h >= p["target"]:
+                    close_pos(sym, p["target"], d, "target")
+                elif (d - p["entry_date"]).days >= ecfg["max_hold_days"]:
+                    close_pos(sym, c * (1 - slip), d, "time")
+                elif c <= p["stop"]:
+                    p["stop_closed_below"] = True
+                continue
             if o <= p["stop"]:
                 close_pos(sym, o * (1 - slip), d, "stop-gap")
             elif l <= p["stop"]:
