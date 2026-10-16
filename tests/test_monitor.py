@@ -663,3 +663,10 @@ def test_each_llm_call_carries_its_prompt_make_up_and_each_run_its_code_version(
     assert set(c["prompt_chars"]) == {"rules", "holdings", "candidates"} and c["prompt_symbols"] == 2
     assert c["prompt_fact_chars"] > 100
     assert T.code_version() is None or len(T.code_version().split("+")[0]) >= 7
+
+
+def test_run_start_records_the_branch_the_job_ran_from(monkeypatch):
+    monkeypatch.setitem(T._CODE, "checkout", {"branch": "r38-counters", "behind_main": 5})
+    T.start_run("desk")
+    T.end_run("ok")
+    assert _events()[0]["branch"] == "r38-counters" and _events()[0]["behind_main"] == 5

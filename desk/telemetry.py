@@ -114,7 +114,7 @@ def start_run(job: str) -> str:
         except Exception:           # the record is a nicety; it must never stop a run
             slot = {}
     emit({"event": "run_start", "pid": os.getpid(), "trigger": trig, "args": redact(" ".join(sys.argv[1:]))[:200],
-          "code": code_version(), "launched_via": process_chain(), **slot})
+          "code": code_version(), "launched_via": process_chain(), **checkout(), **slot})
     if slot.get("late_min", 0) > 10:
         # Fired by launchd but late: the Mac was asleep (launchd runs a missed calendar job on wake) - monitor R-14.
         emit({"event": "slot_deferred", "slot": slot["slot"], "late_min": slot["late_min"]})
@@ -137,6 +137,40 @@ def code_version() -> str | None:
         except Exception:
             _CODE["v"] = None
     return _CODE["v"]
+
+
+def checkout() -> dict:
+    """The branch the job runs from, and how many commits of the last-fetched origin/main it lacks. launchd runs
+    whatever is checked out: at 22:53 on 2026-10-15, a minute after main took two merges, the checkout was
+    switched back to the merged r38-counters branch (GitHub Desktop, the third time), and the next run would
+    have used three-day-old code with nothing in the brief to say so. {} outside a git checkout."""
+    if "checkout" not in _CODE:
+        root = Path(__file__).resolve().parent.parent
+        try:
+            git = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True,  # noqa: E731
+                                            text=True, timeout=5).stdout.strip()
+            branch = git("rev-parse", "--abbrev-ref", "HEAD")
+            behind = git("rev-list", "--count", "HEAD..origin/main")
+            _CODE["checkout"] = {"branch": branch or None, "behind_main": int(behind) if behind.isdigit() else None} if branch else {}
+        except Exception:
+            _CODE["checkout"] = {}
+    return _CODE["checkout"]
+
+
+def checkout_warning(co: dict) -> str | None:
+    """A brief line when the desk is not running main as last fetched, else None."""
+    if not co or not co.get("branch"):
+        return None
+    branch, behind = co["branch"], co.get("behind_main")
+    if branch == "main" and not behind:
+        return None
+    lag = f"{behind} commit{'s' if behind != 1 else ''} behind origin/main" if behind else ""
+    if branch == "main":
+        where = f"main {lag}"
+    else:
+        where = ("a detached commit" if branch == "HEAD" else f"branch '{branch}'") + ", not main" + (f", {lag}" if lag else "")
+    return (f"WARNING: the desk ran from {where} - check the checkout (GitHub Desktop has switched it before): "
+            f"git checkout main && git pull --ff-only")
 
 
 def record_missed_slots(now: datetime | None = None) -> list:
