@@ -243,6 +243,9 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         expected_bar -= timedelta(days=1)
     stale = last_bar < expected_bar and not args.force
     notes.append(f"data through {last_bar.isoformat()}" + (" - STALE, entries suppressed" if stale else ""))
+    co_note = telemetry.checkout_warning(telemetry.checkout())
+    if co_note:
+        notes.append(co_note)
     clock = now_et()
     if session_open and last_bar >= clock.date():
         # Only under --force: otherwise a run during the session is protect-only and never gets here.
