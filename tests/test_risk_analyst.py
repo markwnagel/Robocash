@@ -220,3 +220,28 @@ def test_the_fact_sheet_says_how_many_headlines_it_left_out():
     c = compact({"symbol": "AMD", "news_7d": 14, "headlines_dropped_unrelated": 14, "headlines": hl})
     assert len(c["headlines"]) == 8 and c["headlines_not_shown"] == 6
     assert "headlines_not_shown" not in compact({"symbol": "X", "news_7d": None, "headlines": []})
+
+
+def test_an_undated_web_page_counts_as_no_evidence(monkeypatch):
+    """2026-10-15: 1 web citation, 0 dated, though the prompt requires a publication date (monitor F-31/F-34)."""
+    from desk import analyst
+    payload = {"holdings": [], "candidates": [{"symbol": s, "facts": {}} for s in ("IOVA", "FTNT", "CAKE", "MXL")]}
+    monkeypatch.setattr(analyst, "_call_json", lambda *a, **k: {"cases": [
+        {"symbol": "IOVA", "bear_case": "ATM.", "trap_type": "dilution", "severity": 0.6, "evidence": "web: sec.gov"},
+        {"symbol": "FTNT", "bear_case": "Event.", "trap_type": "event-in-window", "severity": 0.6,
+         "evidence": "web: reuters.com, 2026-10-12"},
+        {"symbol": "CAKE", "bear_case": "Event.", "trap_type": "event-in-window", "severity": 0.6,
+         "evidence": "earnings_date: 2026-10-27; web: cnbc.com"},
+        {"symbol": "MXL", "bear_case": "Squeeze.", "trap_type": "squeeze", "severity": 0.6,
+         "evidence": "web: a.com; web: b.com, May 2026"}]})
+    events = []
+    monkeypatch.setattr(analyst.telemetry, "agent_output", lambda role, *a, **k: events.append(k))
+    cases = analyst.red_team(payload, {"analyst": {"model": "m", "red_team_max_web_searches": 1}})
+    assert cases["IOVA"]["severity"] == analyst.UNCITED_SEVERITY_CAP and "web sources undated" in cases["IOVA"]["bear_case"]
+    assert cases["FTNT"]["severity"] == analyst.WEB_ONLY_SEVERITY_CAP     # dated web only: the web cap
+    assert cases["CAKE"]["severity"] == 0.6                               # a fact-sheet field still carries it
+    assert cases["MXL"]["severity"] == analyst.WEB_ONLY_SEVERITY_CAP      # the dated page is left
+    assert events[-1]["web_undated_capped"] == 1
+    assert analyst.drop_undated_web("web: a.com; shelf_filings: S-3 2026-01-01; web: b.com, 2026-10-01") == \
+        "shelf_filings: S-3 2026-01-01; web: b.com, 2026-10-01"
+    assert "without its\npublication date counts as no evidence" in analyst.RED_TEAM_SYSTEM
