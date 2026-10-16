@@ -414,3 +414,26 @@ def test_the_classifier_logs_how_much_it_was_given(monkeypatch):
     e = [x for x in T.load_events(datetime(2000, 1, 1, tzinfo=timezone.utc), datetime(2100, 1, 1, tzinfo=timezone.utc))
          if x["event"] == "llm_call"][-1]
     assert e["role"] == "classifier" and e["prompt_symbols"] == 2 and e["prompt_headlines"] == 3 and e["input_chars"] > 0
+
+
+def test_the_fact_sheet_says_when_the_company_last_reported(tmp_path):
+    """TEAM 2026-10-14/15: a re-posted "Q4 2026 earnings call" transcript read as a stale earnings_date two days
+    running. Atlassian's fiscal Q4 was reported in August; the 8-K item 2.02 says so (monitor F-33)."""
+    from datetime import date
+    from desk.edgar import last_results
+    fs = [{"form": "8-K", "date": date(2026, 8, 6), "items": "2.02,9.01"},
+          {"form": "8-K", "date": date(2026, 9, 2), "items": "5.02"},
+          {"form": "8-K", "date": date(2026, 5, 1), "items": "2.02"},
+          {"form": "10-K", "date": date(2026, 8, 8), "items": ""}]
+    assert last_results(fs) == "2026-08-06"
+    assert last_results([{"form": "6-K", "date": date(2026, 8, 6), "items": ""}]) is None     # foreign issuer
+    fb = _fb_with_edgar(tmp_path, [])
+    fb.today = date(2026, 10, 15)
+    fb.edgar.filings = lambda cik, since: [f for f in fs if f["date"] >= since]
+    assert fb._edgar("TEAM", spot=210.0)["last_results_8k"] == "2026-08-06"
+
+
+def test_the_ai_roles_are_told_how_to_read_an_earnings_headline_against_the_dates(cfg):
+    from desk.analyst import analyst_rules
+    r = analyst_rules(cfg)["earnings_dates"]
+    assert "last_results_8k" in r and "fiscal year" in r and "re-posted" in r

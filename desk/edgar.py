@@ -168,5 +168,14 @@ def standing_shelf(filings: list, today: date) -> dict:
             "prospectus_supplements_12m_n": len(sups)}
 
 
+def last_results(filings: list) -> str | None:
+    """Date of the latest 8-K item 2.02 (results of operations): when the company last reported. The calendar
+    gives only the next report, so a re-posted "Q4 2026 earnings call" transcript read as a stale earnings_date
+    on TEAM two days running - Atlassian's fiscal Q4 ends in June and was reported in August (monitor F-33)."""
+    dates = [f["date"] for f in filings if f["form"] in ("8-K", "8-K/A")
+             and "2.02" in {i.strip() for i in (f.get("items") or "").split(",")}]
+    return max(dates).isoformat() if dates else None
+
+
 def recent_8k_items(filings: list) -> list:
     return [f"{f['date'].isoformat()}: {f['items']}" for f in filings if f["form"] in ("8-K", "8-K/A") and f["items"]]

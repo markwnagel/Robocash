@@ -21,7 +21,7 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import NewsRequest, OptionChainRequest
 
 from . import telemetry
-from .edgar import Edgar, offering_filings, recent_8k_items, shelf_filings, standing_shelf
+from .edgar import Edgar, last_results, offering_filings, recent_8k_items, shelf_filings, standing_shelf
 from .state import atomic_write_text
 
 log = logging.getLogger("desk.facts")
@@ -471,7 +471,7 @@ class FactBuilder:
         out = {"cik": None, "offering_filings": [], "shelf_filings": [], "insider_net_buy_30d": None,
                "insider_net_buy_90d": None, "insider_transactions_90d": None, "insider_excluded_n": 0,
                "insider_note": None, "recent_8k_items": [], "shelf_registration": None,
-               "prospectus_supplements_12m": [], "prospectus_supplements_12m_n": 0}
+               "prospectus_supplements_12m": [], "prospectus_supplements_12m_n": 0, "last_results_8k": None}
         if not self.edgar:
             return out
         try:
@@ -484,7 +484,8 @@ class FactBuilder:
             out["shelf_filings"] = shelf_filings(filings)
             out["recent_8k_items"] = recent_8k_items([f for f in filings if f["date"] >= self.today - timedelta(days=30)])[:6]
             # The same submissions file, read further back (no extra request: it is cached for 12 hours).
-            out.update(standing_shelf(self.edgar.filings(cik, self.today - timedelta(days=3 * 365)), self.today))
+            long = self.edgar.filings(cik, self.today - timedelta(days=3 * 365))
+            out.update(standing_shelf(long, self.today), last_results_8k=last_results(long))
             if any(f["form"] in FOREIGN_ISSUER_FORMS for f in filings):
                 # A foreign private issuer's insiders are exempt from Section 16: stray Form 4 rows (UMC's were
                 # priced in TWD) are not a signal, and "unavailable" read as a data failure every day.
