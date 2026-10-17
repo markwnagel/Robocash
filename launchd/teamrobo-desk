@@ -17,6 +17,11 @@ if [ "$(date +%H%M)" -ge "${TEAMROBO_EMAIL_AT:-1400}" ] && [ ! -e "state/reports
   TEAMROBO_TRIGGER=chained "$here/teamrobo-email"
 fi
 
-# Hold the Mac awake 20 more minutes so the 14:00 email job is not cut short by sleep.
-/usr/bin/caffeinate -i -t "${TEAMROBO_HOLD_SECONDS:-1200}"
+# Hold the Mac awake 20 more minutes so the 14:00 email job is not cut short by sleep, and at least until 14:50
+# so the 14:30 health review (a Claude app scheduled task, teamrobo-health-review) starts: the Mac sleeps after
+# a minute idle, and pmset allows only the one repeating wake (13:40).
+hold=${TEAMROBO_HOLD_SECONDS:-1200}
+until=$(date -j -f "%H:%M" "${TEAMROBO_AWAKE_UNTIL:-14:50}" +%s 2>/dev/null) &&
+  [ $((until - $(date +%s))) -gt "$hold" ] && hold=$((until - $(date +%s)))
+"${TEAMROBO_CAFFEINATE:-/usr/bin/caffeinate}" -i -t "$hold"
 exit $status

@@ -64,13 +64,14 @@ def test_the_email_script_runs_the_monitor_then_the_report_from_the_project_root
 def test_the_desk_script_runs_the_desk_and_reports_its_exit_status(tmp_path):
     root = _fake_project(tmp_path, exit_code=3)
     r = subprocess.run([str(root / "launchd" / "teamrobo-desk")], cwd="/", timeout=60,
-                       env={**os.environ, "TEAMROBO_HOLD_SECONDS": "1", "TEAMROBO_EMAIL_AT": "2400"})
+                       env={**os.environ, "TEAMROBO_HOLD_SECONDS": "1", "TEAMROBO_AWAKE_UNTIL": "00:00", "TEAMROBO_EMAIL_AT": "2400"})
     assert (root / "calls.txt").read_text().splitlines() == [f"{root.resolve()} run_daily.py"]
     assert r.returncode == 3                         # a failed desk run shows as one in launchctl
 
 
 def _desk_after_email_slot(root: Path):
-    env = {**os.environ, "TEAMROBO_HOLD_SECONDS": "1", "TEAMROBO_EMAIL_AT": "0000"}     # always "after 14:00"
+    env = {**os.environ, "TEAMROBO_HOLD_SECONDS": "1", "TEAMROBO_AWAKE_UNTIL": "00:00",
+           "TEAMROBO_EMAIL_AT": "0000"}     # always "after 14:00"
     subprocess.run([str(root / "launchd" / "teamrobo-desk")], cwd="/", timeout=60, env=env)
     return (root / "calls.txt").read_text().splitlines()
 
@@ -102,3 +103,24 @@ def test_a_second_email_job_steps_aside_while_one_runs_and_a_stale_lock_is_clear
     (lock / "pid").write_text("999999")                           # its owner was killed
     subprocess.run([str(root / "launchd" / "teamrobo-email")], cwd="/", check=True, timeout=60)
     assert len((root / "calls.txt").read_text().splitlines()) == 2 and not lock.exists()
+
+
+def test_the_desk_script_keeps_the_mac_awake_for_the_afternoon_health_review(tmp_path):
+    """The 14:30 health review is a Claude app scheduled task: launchd does not wake the Mac for it, and the desk's
+    20-minute hold ran out around 14:07. The hold now lasts until TEAMROBO_AWAKE_UNTIL (default 14:50)."""
+    from datetime import datetime
+    import pytest
+    now = datetime.now()
+    if now.hour == 23 and now.minute >= 30:
+        pytest.skip("too close to midnight to aim the hold at 23:59")
+    root = _fake_project(tmp_path)
+    caf = root / "caffeinate"
+    caf.write_text(f'#!/bin/sh\necho "$*" >> "{tmp_path}/hold.txt"\n')
+    caf.chmod(0o755)
+    base = {**os.environ, "TEAMROBO_EMAIL_AT": "2400", "TEAMROBO_CAFFEINATE": str(caf), "TEAMROBO_HOLD_SECONDS": "1200"}
+    subprocess.run([str(root / "launchd" / "teamrobo-desk")], cwd="/", timeout=60, env={**base, "TEAMROBO_AWAKE_UNTIL": "23:59"})
+    left = (datetime.now().replace(hour=23, minute=59, second=0) - datetime.now()).total_seconds()
+    subprocess.run([str(root / "launchd" / "teamrobo-desk")], cwd="/", timeout=60, env={**base, "TEAMROBO_AWAKE_UNTIL": "00:00"})
+    holds = [int(line.split()[-1]) for line in (tmp_path / "hold.txt").read_text().splitlines()]
+    assert abs(holds[0] - max(1200, left)) <= 61         # until 23:59 (date fills in the current seconds)
+    assert holds[1] == 1200                               # a time already past: the 20 minutes alone
