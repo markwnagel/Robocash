@@ -427,7 +427,8 @@ snapshot time for this reason. Cash matches to the penny; only position marks dr
 
 **launchd does not wake a sleeping Mac**, and this one sleeps after a minute idle. A single
 `pmset repeat wakeorpoweron` event at 13:40 starts the desk job, which holds the machine awake for 20 minutes
-after it finishes (`caffeinate -i -t 1200` in its plist) to carry it through the 14:00 report. The Saturday
+after it finishes, and at least until 14:50 (`caffeinate -i` at the end of `launchd/teamrobo-desk`), to carry it
+through the 14:00 report and the start of the 14:30 health review (a Claude app scheduled task). The Saturday
 audit has no wake of its own and runs whenever the Mac is next awake - harmless, it only reads.
 
 The Mac must be awake at 16:45 ET. Orders placed after the close queue for the next open; time-based exits and
