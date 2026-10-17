@@ -434,6 +434,9 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             "date": today.isoformat(), "mode": "PAPER" + (" DRY-RUN" if args.dry_run else ""),
             "account": {"equity": equity, "cash": acct["cash"], "drawdown_from_hwm": round(decision.drawdown, 4),
                         "day_return": round(decision.daily_return, 4), "kill_switch_at": rcfg["max_drawdown_pct"]},
+            # The prompt asks for the regime, and without this the brief guessed it from the drawdown: "Regime is
+            # risk-off" on a risk-on day (monitor F-37, 2026-10-16).
+            "regime": {"label": regime_label, "state": regime_status},
             "limits": {"max_positions": pcfg["max_positions"], "target_positions": target_positions,
                        "max_position_pct": day_pcfg["max_position_pct"], "max_hold_days": ecfg["max_hold_days"]},
             "rules": analyst_rules(cfg),
@@ -468,6 +471,8 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                                                            cfg["analyst"]["reduce_factor"])
             exits.update(extra)
             notes += verdict_notes
+            if analyst_out.get("regime_mismatch"):
+                notes.append(f"WARNING: {analyst_out['regime_mismatch']}")
             notes += [f"data concern: {c}" for c in analyst_out.get("data_concerns", [])]
             for c in analyst_out.get("data_concerns", []):
                 telemetry.emit({"event": "data_concern", "source": "analyst", "text": telemetry.redact(c)[:500],
