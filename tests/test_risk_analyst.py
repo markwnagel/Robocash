@@ -245,3 +245,23 @@ def test_an_undated_web_page_counts_as_no_evidence(monkeypatch):
     assert analyst.drop_undated_web("web: a.com; shelf_filings: S-3 2026-01-01; web: b.com, 2026-10-01") == \
         "shelf_filings: S-3 2026-01-01; web: b.com, 2026-10-01"
     assert "without its\npublication date counts as no evidence" in analyst.RED_TEAM_SYSTEM
+
+
+def test_a_brief_naming_a_regime_the_desk_is_not_in_is_caught(monkeypatch):
+    """2026-10-16: "Regime is risk-off: equity -3.3% today ..." while the desk ran risk-on (monitor F-37)."""
+    from desk import analyst
+    m = analyst.brief_regime_mismatch
+    assert "risk-off" in m("Regime is risk-off: equity -3.3% today.", "risk-on")
+    assert m("Regime is risk-on; drawdown 10.4%.", "risk-on") is None
+    assert m("Regime is risk-on.", "risk-on (strong)") is None
+    assert "risk-on" in m("Still risk on despite the drop.", "risk-off")
+    assert m("No regime word at all.", "risk-on") is None
+    assert m("Regime is risk-off.", "disabled") is None and m("Regime is risk-off.", None) is None
+    # review() sets it from the payload's regime and records it on the agent_output event.
+    events = []
+    monkeypatch.setattr(analyst.telemetry, "agent_output", lambda *a, **k: events.append(k))
+    monkeypatch.setattr(analyst, "_call_json", lambda *a, **k: {"data_concerns": [], "verdicts": [],
+                                                                "brief": "Regime is risk-off."})
+    out = analyst.review({"regime": {"label": "risk-on", "state": "neutral"}}, {"analyst": {"model": "m", "max_web_searches": 0}})
+    assert out["regime_mismatch"] and events[-1]["brief_regime_mismatch"] is True
+    assert "regime.label word for word" in analyst.ANALYST_SYSTEM
