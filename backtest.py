@@ -65,7 +65,8 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                  earnings: pd.DataFrame | None = None, insider: pd.DataFrame | None = None,
                  regime_state: pd.Series | None = None, panels: dict | None = None,
                  members: pd.DataFrame | None = None, entry_rng: np.random.Generator | None = None,
-                 veto: dict | None = None, offerings: pd.DataFrame | None = None) -> tuple:
+                 veto: dict | None = None, offerings: pd.DataFrame | None = None,
+                 sweep_px: pd.Series | None = None) -> tuple:
     """panels: precomputed compute_panels(panel, cfg['signals']) - pass it when running the same panel and
     signal settings many times (--stagger), since it is the bulk of each run's cost.
 
@@ -121,6 +122,14 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
         for v in off_by_sym.values():
             v.sort()
     off_window = pd.Timedelta(days=90)
+    # Cash sweep (portfolio.cash_sweep): idle cash above the floor and tonight's staged orders is held in SPY,
+    # bought or sold at the close when it is off by more than band_pct of equity, and sold to cash by the kill
+    # switch, the hard floor and a regime exit. sweep_px: SPY closes. The live account averaged ~44% cash
+    # (2026-09-15..10-16), which lags SPY in any rising market (engineering review 2026-10-17, item 7).
+    swcfg = pcfg.get("cash_sweep") or {}
+    SW = (sweep_px.reindex(cl.index).ffill().to_numpy(dtype=float)
+          if swcfg.get("enabled") and sweep_px is not None else None)
+    sweep_sh, sweep_band = 0, float(swcfg.get("band_pct", 0.02))
 
     cash, positions, pending, trades, curve = capital, {}, [], [], []
     hwm, ath, last_equity, halted_until = capital, capital, capital, None
@@ -173,7 +182,14 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
         return CF[i, col[sym]]
 
     def mark():
-        return cash + sum(q["qty"] * last(s) for s, q in positions.items() if not np.isnan(last(s)))
+        sw = sweep_sh * SW[i] if SW is not None and sweep_sh and not np.isnan(SW[i]) else 0.0
+        return cash + sw + sum(q["qty"] * last(s) for s, q in positions.items() if not np.isnan(last(s)))
+
+    def unsweep():
+        nonlocal cash, sweep_sh
+        if SW is not None and sweep_sh and not np.isnan(SW[i]):
+            cash += sweep_sh * SW[i] * (1 - slip)
+            sweep_sh = 0
 
     for i in range(warm, len(dates)):
         d = dates[i]
@@ -275,6 +291,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             # stand-in for a human running --resume --reset-hwm after a long pause.
             for sym in list(positions):
                 close_pos(sym, last(sym) * (1 - slip), d, "hard-floor")
+            unsweep()
             equity = cash
             hwm = ath = equity
             halted_until = i + 3 * halt_cooldown
@@ -282,6 +299,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
         elif drawdown >= rcfg["max_drawdown_pct"]:
             for sym in list(positions):
                 close_pos(sym, last(sym) * (1 - slip), d, "kill-switch")
+            unsweep()
             equity = cash
             hwm = equity
             halted_until = i + halt_cooldown
@@ -326,9 +344,10 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             scale = float(regime.get(d, 1.0)) if regime is not None else 1.0
             rp = {"target_positions": max(1, int(round(pcfg["target_positions"] * scale))),
                   "max_position_pct": pcfg["max_position_pct"], "liquidate": False}
-        if rp["liquidate"] and positions:
+        if rp["liquidate"] and (positions or sweep_sh):
             for sym in list(positions):
                 close_pos(sym, last(sym) * (1 - slip), d, "regime")
+            unsweep()
             equity = cash
         day_pcfg = dict(pcfg, max_position_pct=rp["max_position_pct"])
 
@@ -356,7 +375,10 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
             picks = select_entries(esnap, rets, list(positions), slots, pcfg)
             if max_new:
                 picks = picks[:max_new]
-            cash_avail = cash - equity * pcfg["cash_floor_pct"]
+            # The sweep is money for entries: it is sold this evening to fund them (the rebalance below reserves
+            # their cost). Counting cash alone starved entries - 2023-26 CAGR fell 18.9% -> 13.6% in the first run.
+            swept = sweep_sh * SW[i] if SW is not None and sweep_sh and not np.isnan(SW[i]) else 0.0
+            cash_avail = cash + swept - equity * pcfg["cash_floor_pct"]
             for sym in picks:
                 row = esnap.loc[sym]
                 sz = size_position(equity, cash_avail, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
@@ -398,6 +420,25 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                     cash_avail -= q * px
                     pending.append({"symbol": sym, "qty": q, "limit": entry_limit(px), "atr": a, "add": True})
 
+        if SW is not None and not np.isnan(SW[i]):
+            flat = (halted_until is not None and i < halted_until) or rp["liquidate"]
+            if flat:
+                unsweep()
+            else:
+                equity = mark()
+                reserve = equity * pcfg["cash_floor_pct"] + sum(e["qty"] * e["limit"] for e in pending)
+                excess = cash - reserve
+                if abs(excess) > sweep_band * equity:
+                    px = SW[i]
+                    if excess > 0:
+                        q = int(excess // (px * (1 + slip)))
+                        cash -= q * px * (1 + slip)
+                        sweep_sh += q
+                    else:
+                        q = min(sweep_sh, int(math.ceil(-excess / (px * (1 - slip)))))
+                        cash += q * px * (1 - slip)
+                        sweep_sh -= q
+            equity = mark()
         curve.append((d, equity, len(positions), cash))
         last_equity = equity
 

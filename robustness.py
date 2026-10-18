@@ -134,7 +134,7 @@ def run_job(job: dict) -> dict:
         panels=cache[key], members=_G["members"][job.get("universe", "pit")],
         entry_rng=rng if job.get("mode") == "random" else None,
         veto={**FRICTIONS, **job.get("frictions", {}), "rng": rng} if job.get("mode") == "frictions" else None,
-        offerings=_G.get("offerings") if job.get("offerings") else None)
+        offerings=_G.get("offerings") if job.get("offerings") else None, sweep_px=_G.get("spy"))
     return {"name": job["name"], "group": job["group"], "job": {k: v for k, v in job.items() if k != "overrides"},
             "overrides": [[".".join(p), v] for p, v in job.get("overrides", [])],
             "equity": curve["equity"], "n_positions": curve["n_positions"], "cash": curve["cash"],
