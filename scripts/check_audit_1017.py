@@ -3,7 +3,7 @@
   1. exits.stop_anchor: the live desk measures the bracket from the signal-day close, the backtest from the fill
   2. exits.signal_decay_rank: 40 -> 20 / 25 / 30
   3. analyst.reduce_factor: 0.75 -> 1.0 (paired seeds, REDUCE modelled as a random cut, as on 2026-10-03)
-Reuses robustness.py's runner; writes state/robustness/2026-10-17-audit/. Nothing here touches trials.jsonl.
+Reuses robustness.py's runner; writes state/robustness/2026-10-17-audit/. Each variant is logged to trials.jsonl (robustness.log_variant_trials).
 
   python scripts/check_audit_1017.py      summary: see config.yaml comments
 """
@@ -67,12 +67,14 @@ def main():
         for r in ex.map(R.run_job, jobs, chunksize=1):
             res[r["name"]] = r
     inputs.unlink(missing_ok=True)
+    R.log_variant_trials(root / "state" / "history" / "trials.jsonl", jobs, res, "audit-2026-10-17")
     rows = []
     for j in jobs:
         r = res[j["name"]]
         st, t = R.full_stats(r["equity"]), r["trades"]
         row = {**{k: j.get(k) for k in ("name", "group", "variant", "offset", "reduce_rate", "start")},
-               "n_trades": r["n_trades"], "total": st["total"], "cagr": st["cagr"], "maxdd": st["maxdd"], "sharpe": st["sharpe"]}
+               "n_trades": r["n_trades"], "total": st["total"], "cagr": st["cagr"], "maxdd": st["maxdd"], "sharpe": st["sharpe"],
+               **R.excess_vs_spy(r["equity"], spy)}
         if t is not None and len(t):
             stops = t[t["reason"].isin(["stop", "stop-gap"])]
             decay = t[t["reason"] == "decay"]

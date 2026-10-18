@@ -155,7 +155,9 @@ facts:
   insider_price_band: 3.0            # rows priced outside [spot/3, spot*3] are currency/ADR-ratio artifacts
   insider_tilt_weight: 0.0           # promotion needs a backtest first; see README
   insider_min_net_usd: 100000
-  classifier_model: claude-opus-5
+  classifier_model: claude-sonnet-5   # was claude-opus-5 ($0.09 a run). Tags headlines (offering, guidance cut,
+                                      # acquisition, legal) - a narrow task; its offering tag can block a buy, so
+                                      # watch the monitor's classifier flags for a change after 2026-10-19.
 
 analyst:
   enabled: true
@@ -180,8 +182,10 @@ analyst:
                                # REDUCE is still recorded (thesis, brief) and REMOVE still vetoes; the implied-vol
                                # half-size is unchanged.
   red_team_enabled: true
-  red_team_max_web_searches: 5    # was 10; analyst was 20. Each search adds 20-35k input tokens (2026-09-29,
-                                  # monitor F-19); 1-2 a run is normal, 5 caps the worst case
+  red_team_max_web_searches: 2    # was 10, then 5. Each search adds 20-35k input tokens (2026-09-29, monitor
+                                  # F-19); 1-2 a run is normal. 2 from 2026-10-17 (engineering review: cost)
+  red_team_scope: candidates      # candidates | all. 'all' also wrote bear cases for every holding: 30% of API
+                                  # spend, one high-severity case in 18 runs, and a holding's REDUCE is not acted on
 
 audit:
   email: true                  # Saturdays: email the finished audit to report.to (one per audit; audit.py
@@ -198,6 +202,13 @@ notify:
   webhook_url_env: DESK_WEBHOOK_URL
   webhook_payload_key: text
 
+budget:
+  monthly_api_usd: 40          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). Keep the
+                               # Anthropic Console limit at or above this: at the Console limit every role fails and
+                               # the desk buys nothing (2026-10-17). ~$35/mo before the 2026-10-17 cuts, ~4%/yr of
+                               # the $10k account; target <= ~1.5%/yr until the agents show value. October already
+                               # had ~$22 before the cuts; lower this to ~20 from November once telemetry shows them.
+
 report:
   to: mark@markwnagel.com   # daily activity email, 14:00 local (after the 13:40 desk run)
                             # Credentials live in .env only: SMTP_HOST/SMTP_USER/SMTP_PASSWORD
@@ -210,6 +221,9 @@ report:
 monitor:                       # agent reliability monitor (monitor.py): runs weekdays before the 14:00 report
   enabled: true
   model: claude-opus-5         # one call a day; first run: 15.6k in, 17.4k out (incl. reasoning), $0.51, 3.2 min
+  model_review_weekdays: [4]   # 0=Mon. The model review runs Fridays, on any day a hard alarm fires, and at least weekly;
+                               # other days write a rules-only report (hard alarms still run and escalate). Was daily:
+                               # $0.63/day, 37% of API spend, 91% of findings SEV3/4 (engineering review 2026-10-17).
   prompt_file: agent-monitor-prompt.md   # its Configuration block is filled from this section at run time
   window_hours: 24             # first run only; afterwards the window is "since the previous monitor run"
   baseline_days: 7
@@ -258,7 +272,12 @@ monitor:                       # agent reliability monitor (monitor.py): runs we
       slos: {task_success_rate: "one run every 8 days or fewer", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 6}
 
 backtest:
-  prior_untracked_trials: 1    # the $5M-volume universe variant (2026-09-12), not re-run: it needs its own 1500-name
-                               # price download. The other 13 variants from that day were re-run on the frozen
-                               # universe on 2026-09-24 and are in state/history/trials.jsonl. Every variant counts
-                               # toward the Deflated Sharpe's N: a result picked from many tries must clear a higher bar.
+  prior_untracked_trials: 63   # Every variant counts toward the Deflated Sharpe's N: a result picked from many tries
+                               # must clear a higher bar. Not in state/history/trials.jsonl (counted 2026-10-17,
+                               # engineering review): the $5M-volume universe (2026-09-12) 1; robustness.py 09-24
+                               # design 4 + sensitivity 24; 10-03 audit check 4; 10-13 stop variants 3 (2.5x ATR was
+                               # already a sensitivity run); 10-17 audit check 3 (decay 20 and 30, reduce 1.0); 10-16
+                               # studies of the desk as a sleeve 8 and sector-ETF rotation rules 16. N 20 -> 83 moves
+                               # the current config's Deflated Sharpe from 0.955 to 0.937, just under the 0.95 bar.
+                               # From here robustness.log_variant_trials() logs the check scripts' variants; a re-run
+                               # of a script counted above is then counted twice, which errs on the strict side.

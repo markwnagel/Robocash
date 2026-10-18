@@ -453,7 +453,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             "blocked_by_hard_filters": blocked,
         }
         if cfg["analyst"].get("red_team_enabled"):
-            cases = red_team(payload, cfg)
+            cases = red_team(red_team_view(payload, cfg), cfg)
             if cases:
                 payload["red_team"] = cases
                 flagged = [f"{s} {c['trap_type']} {c['severity']:.1f}" for s, c in cases.items() if c["severity"] >= 0.5]
@@ -506,6 +506,16 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     return {"exits": exits, "entries": entries, "adds": adds, "trims": trims, "analyst_out": analyst_out,
             "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
             "regime": regime_status, "regime_label": regime_label}
+
+
+def red_team_view(payload: dict, cfg: dict) -> dict:
+    """What the red team reviews. With analyst.red_team_scope 'candidates' it gets only today's candidates (holdings
+    as bare symbols, for concentration): 30% of API spend went on bear cases for every holding as well, and in 18
+    runs they produced one high-severity case, while a holding's REDUCE is never acted on (engineering review
+    2026-10-17). The analyst still reviews holdings, with their fact sheets."""
+    if cfg["analyst"].get("red_team_scope", "all") != "candidates":
+        return payload
+    return {**payload, "holdings": [], "held_symbols": [h["symbol"] for h in payload.get("holdings", [])]}
 
 
 def protect(st: dict, broker, exits: dict, notes: list) -> None:
