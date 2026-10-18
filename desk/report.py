@@ -50,13 +50,18 @@ def baselines(today: date, first: date) -> dict:
     return {k: max(v, first) for k, v in out.items()}
 
 
-def performance(equity: pd.Series, spy: pd.Series, today: date) -> list:
-    """[{period, from, desk_pct, spy_pct, diff_pct}] - desk against buy-and-hold SPY over the same dates."""
+def performance(equity: pd.Series, spy: pd.Series, today: date, release: dict | None = None) -> list:
+    """[{period, from, desk_pct, spy_pct, diff_pct}] - desk against buy-and-hold SPY over the same dates. With a
+    release ({'name', 'since'}, config release) a "Since <name>" row comes first: the current strategy version's
+    own result, beside the account's since inception."""
     if equity.empty:
         return []
     first = inception(equity)
     rows = []
-    for label, start in baselines(today, first).items():
+    periods = baselines(today, first)
+    if release and release.get("name") and release.get("since") and release["since"] > first:
+        periods = {f"Since {release['name']}": release["since"], **periods}
+    for label, start in periods.items():
         e0, s0 = _asof(equity, start), _asof(spy, start)
         e1, s1 = float(equity.iloc[-1]), (float(spy.iloc[-1]) if len(spy) else None)
         if not e0 or not e1:

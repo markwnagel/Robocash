@@ -22,7 +22,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, GetPortfolioHistoryRequest
 
-from desk.config import alpaca_keys, load_config, require_paper
+from desk.config import alpaca_keys, load_config, release, require_paper
 from desk.data import fetch_daily_bars
 from desk.notify import send, send_email
 from desk.report import (build_report, diff_fingerprint, fingerprint, holdings_at_close, load_json, movers,
@@ -250,7 +250,7 @@ def main() -> None:
     except Exception as e:
         log.warning("SPY unavailable: %s", e)
         spy = pd.Series(dtype=float)
-    perf = performance(eq_series, spy, today)
+    perf = performance(eq_series, spy, today, release(cfg))
 
     facts = load_json(root / cfg["data"]["cache_dir"] / f"facts_{today.isoformat()}.json", {})
     fp_path = STATE_DIR / "fingerprint.json"

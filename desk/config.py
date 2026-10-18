@@ -51,6 +51,16 @@ def validate(cfg: dict) -> None:
         raise ValueError("config.yaml is invalid:\n  " + "\n  ".join(problems))
 
 
+def release(cfg: dict) -> dict:
+    """{'name', 'since' (date or None)}: the release results are reported under (config release)."""
+    from datetime import date as _date
+    r = cfg.get("release") or {}
+    since = r.get("since")
+    if since is not None and not isinstance(since, _date):
+        since = _date.fromisoformat(str(since))
+    return {"name": r.get("name"), "since": since}
+
+
 def load_config(path=None) -> dict:
     load_dotenv(ROOT / ".env")
     cfg_path = Path(path) if path else ROOT / "config.yaml"

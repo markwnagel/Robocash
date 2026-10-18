@@ -13,6 +13,12 @@
 #   both               excess -5.5 / -0.1pt   (0/4, 0/4)          max DD -26.3% / -17.2%
 # None passes; today's config stays. 15 positions is the near miss (return, not excess, and a slightly deeper
 # drawdown); off_liquidate cuts drawdown by a third in 2018-26 without beating SPY - a risk choice, not edge.
+release:                       # the strategy version results are reported under (README "Releases")
+  name: v2.0                   # git tag v2.0. v1.0 = the code of the 2026-10-16 desk run (9f13ae6)
+  since: 2026-10-16            # results count from this close, the last v1 run; the first v2 run is 2026-10-19.
+                               # Reports show "since v2.0" beside "since inception"; the kill switch, high-water
+                               # mark and cumulative floor stay continuous - a release never resets a risk limit.
+                               # Positions held at the cut are labelled v1.0 (carried) in the trade log.
 account:
   paper: true
   starting_capital: 10000

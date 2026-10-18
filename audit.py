@@ -21,7 +21,7 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 
 from desk.analyst import _call_json
-from desk.config import ROOT, alpaca_keys, load_config
+from desk.config import ROOT, alpaca_keys, load_config, release
 from desk.data import cached_bars
 from desk import schedule
 from desk.notify import send, send_email
@@ -40,7 +40,9 @@ exits followed by large continued gains); time or decay exits that sell winners;
 clusters; the risk governor pausing entries at the wrong times; the analyst vetoing names that then performed well (or not vetoing
 names that blew up); insufficient sample size to conclude anything. shadow_book replays every decision that changed what was
 bought - analyst REMOVEs, hard-filter blocks, the implied-vol half size - against the names actually bought; use it to judge those
-layers, and say when a group's sample is too small.
+layers, and say when a group's sample is too small. `release` names the current strategy version (config release) with
+statistics on the trades it opened: judge the current version on its own trades first, and say when a finding rests on
+trades of an earlier version (exit_reason rows labelled 'v1.0' or 'v1.0 (carried)').
 
 Be quantitative and honest about statistical power - with fewer than ~30 closed trades most conclusions are noise, and you must say so.
 Propose at most 3 config changes, each as a specific key/value with the evidence, and state the backtest check the owner should run
@@ -251,7 +253,7 @@ def main() -> None:
     # The audit is the one job that runs on its own day: if the weekday jobs are not loaded, nothing else will
     # say so - they are what send the brief and the email (2026-09-28).
     problems = schedule.schedule_problems(schedule.loaded_jobs(), schedule.repeating_wake())
-    telemetry.note(schedule_problems=len(problems))
+    telemetry.note(schedule_problems=len(problems), release=release(cfg)["name"])
     if problems and not args.stats:
         send_email("TeamRobo ALERT: scheduled jobs need attention", "\n\n".join(problems), cfg)
     since = today - timedelta(days=acfg["lookback_days"])
@@ -268,6 +270,10 @@ def main() -> None:
         except Exception as e:
             log.warning("bars unavailable for post-exit returns: %s", e)
     stats = trade_stats(trades, closes, acfg["post_exit_days"])
+    rel = release(cfg)
+    rel_trades = trades[trades["release"].astype(str) == str(rel["name"])] if (rel["name"] and not trades.empty
+                                                                             and "release" in trades) else trades.iloc[0:0]
+    stats_release = trade_stats(rel_trades, closes, acfg["post_exit_days"]) if len(rel_trades) else {"n_trades": 0}
     state = load_state()
     if args.stats:
         print(json.dumps(stats, indent=1))
@@ -288,6 +294,8 @@ def main() -> None:
         "high_water_mark": state["high_water_mark"], "halted": state["halted"],
         "briefs": {p.stem: p.read_text()[:3000] for p in briefs},
         "shadow_book": shadow_ev,
+        # The current strategy version: trades it opened (a 'v1.0 (carried)' row was v1's pick closed under v2).
+        "release": {"name": rel["name"], "since": str(rel["since"]), "stats": stats_release},
     }
     # Output tokens 11,960 / 11,134 / 15,022 on 09-26..10-10 against a 16k cap, then cut off at 16,000 on 10-17
     # once the 90-day window doubled the trades it reads: the reply did not parse and the week had no audit.

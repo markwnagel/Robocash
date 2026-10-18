@@ -12,8 +12,10 @@ BRIEFS_DIR = STATE_DIR / "briefs"
 
 TRADE_FIELDS = [
     "symbol", "entry_date", "entry_price", "exit_date", "exit_price",
-    "qty", "pnl", "pnl_pct", "hold_days", "exit_reason", "thesis", "stop", "target",
+    "qty", "pnl", "pnl_pct", "hold_days", "exit_reason", "thesis", "stop", "target", "release",
 ]
+# Positions opened before release tracking (2026-10-17) carry no release; they are the v1 book.
+LEGACY_RELEASE = "v1.0"
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -63,6 +65,24 @@ def save_state(st: dict) -> None:
     atomic_write_text(STATE_FILE, json.dumps(st, indent=2, sort_keys=True))
 
 
+def _migrate_trades_header() -> None:
+    """Add the release column to a trade log written before it existed: every earlier row is the v1 book."""
+    with open(TRADES_FILE, newline="") as f:
+        rows = list(csv.DictReader(f))
+        header = rows[0].keys() if rows else []
+    if not rows or "release" in header:
+        return
+    tmp = TRADES_FILE.with_suffix(".tmp")
+    with open(tmp, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TRADE_FIELDS, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            if r.get("symbol") == "symbol":        # a stray repeated header line
+                continue
+            w.writerow({**r, "release": LEGACY_RELEASE})
+    tmp.replace(TRADES_FILE)
+
+
 def record_trade(row: dict) -> bool:
     """Append one closed trade. Idempotent: a run that dies after logging a close but before saving state
     sees the position again next time and would log it twice, so a row already present for the same symbol,
@@ -70,6 +90,8 @@ def record_trade(row: dict) -> bool:
     STATE_DIR.mkdir(exist_ok=True)
     key = (str(row.get("symbol")), str(row.get("entry_date")), str(row.get("exit_date")))
     new = not TRADES_FILE.exists()
+    if not new:
+        _migrate_trades_header()
     if not new:
         with open(TRADES_FILE, newline="") as f:
             if any((r.get("symbol"), r.get("entry_date"), r.get("exit_date")) == key for r in csv.DictReader(f)):

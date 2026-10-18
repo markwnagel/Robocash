@@ -136,7 +136,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = load_config()
     mcfg = cfg.get("monitor") or {}
-    telemetry.note(print_only=args.print_only)
+    telemetry.note(print_only=args.print_only, release=(cfg.get("release") or {}).get("name"))
     if not mcfg.get("enabled", True):
         telemetry.note(status="skipped", reason="monitor disabled in config")
         return
@@ -269,6 +269,7 @@ def main() -> None:
         "hard_alarms": alarms,
         "api_spend_month_to_date": {"usd": spent, "budget_usd": budget or None},
         "parity": par,
+        "release": cfg.get("release"),
         "open_findings": open_f, "previous_recommendations": recs,
     }
 
