@@ -24,6 +24,7 @@ import anthropic
 from desk import telemetry
 from desk.config import alpaca_keys, load_config, require_paper
 from desk import schedule
+from desk import parity
 from desk.monitor import (coverage_alarms, MONITOR_SCHEMA, baseline_view, brief_signatures, build_system_prompt, compare_roles,
                           expected_runs, fallback_report, hard_alarms, job_signals, log_signatures, match_runs,
                           render_config, role_signals, schedule_slots, summary_for_email,
@@ -50,6 +51,9 @@ markdown in report_markdown. Keep the IDs of open findings you still see; number
 run.next_finding_id and new recommendations from run.next_recommendation_id. Give each finding one stable
 `signature` for its underlying problem. hard_alarms were raised by code: report each as a SEV1 finding unless the
 data shows it is wrong, and then say why. Set escalate true only when there is a SEV1 finding.
+`parity` replays the backtest over the live period (desk/parity.py): report the live-vs-backtest gap and its causes
+in a "Live vs backtest" section - the analyst, red team and fills are not simulated, so some gap is expected; flag
+causes that look like a mismatch between the code and what was tested. api_spend_month_to_date is the API spend.
 
 """
 
@@ -193,6 +197,13 @@ def main() -> None:
     spent = month_spend(telemetry.load_events(month_start.astimezone(timezone.utc), now.astimezone(timezone.utc)))
     budget = float((cfg.get("budget") or {}).get("monthly_api_usd") or 0)
     alarms += spend_alarms(spent, budget, now.date())
+    try:
+        par = parity.run(cfg) if (cfg.get("parity") or {}).get("enabled", True) else {}
+    except Exception as e:                     # parity is a lens, never a reason for the monitor to fail
+        log.warning("parity unavailable: %s", e)
+        par = {"error": f"{type(e).__name__}: {e}"}
+    if "error" not in par:
+        alarms += parity.alarms(par, cfg, now.date())
     loaded, wake = schedule.loaded_jobs(), schedule.repeating_wake()
     for job, ok in (loaded or {}).items():
         if not ok:          # a job that is not loaded never runs and never logs: say so while this one can
@@ -257,6 +268,7 @@ def main() -> None:
         "commits": commits_since(root, start), "code_version": telemetry.code_version(),
         "hard_alarms": alarms,
         "api_spend_month_to_date": {"usd": spent, "budget_usd": budget or None},
+        "parity": par,
         "open_findings": open_f, "previous_recommendations": recs,
     }
 

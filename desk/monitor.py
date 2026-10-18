@@ -474,6 +474,9 @@ def fallback_report(payload: dict, reason: str, scheduled: bool = False) -> str:
     for role, s in payload["signals"].items():
         lines.append(f"| {role} | {s['calls']} | {s['error_rate']} | {s['latency_s'].get('p95', 'n/a')} | "
                      f"${s['cost_total_usd']:.2f} | {s['coverage']} |")
+    if "parity" in payload:
+        from . import parity
+        lines += ["", *parity.markdown(payload["parity"])]
     lines += ["", "## Data coverage", *[f"- {k}: {v}" for k, v in payload["coverage"].items()]]
     return "\n".join(lines)
 
