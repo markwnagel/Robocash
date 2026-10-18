@@ -66,7 +66,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                  regime_state: pd.Series | None = None, panels: dict | None = None,
                  members: pd.DataFrame | None = None, entry_rng: np.random.Generator | None = None,
                  veto: dict | None = None, offerings: pd.DataFrame | None = None,
-                 sweep_px: pd.Series | None = None) -> tuple:
+                 sweep_px: pd.Series | None = None, entries_log: list | None = None) -> tuple:
     """panels: precomputed compute_panels(panel, cfg['signals']) - pass it when running the same panel and
     signal settings many times (--stagger), since it is the bulk of each run's cost.
 
@@ -228,6 +228,8 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                               "high_close": fill, "adds": 0, "last_add_price": fill, "initial_risk_per_share": fill - stop}
             if disaster_mult > 0:
                 positions[sym]["disaster"] = round(fill - disaster_mult * e["atr"], 2)
+            if entries_log is not None:      # every entry, including ones still open at the end (desk/parity.py)
+                entries_log.append({"date": d, "symbol": sym, "price": fill, "qty": qty})
         pending = []
 
         for sym in list(positions):

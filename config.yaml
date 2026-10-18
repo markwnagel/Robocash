@@ -235,6 +235,12 @@ shadow:                        # desk/shadow.py: every veto, block and half size
                                # did at least as well as the names bought, the audit flags it for retirement. Set
                                # 2026-10-17 before any data (engineering review); the owner decides, code never does.
 
+parity:                        # desk/parity.py: the backtest replayed over the live period, in the monitor's report
+  enabled: true
+  equity_gap_alarm_pts: 5      # SEV2 when live and the replay differ by more than this many percentage points.
+                               # First run 2026-10-17 (09-12..10-16): live -6.4%, backtest -2.5%, SPY -0.1%; cash
+                               # 50% vs 22%; 22 entries matched, 6 backtest-only (3 were the dilution block), 10 live-only
+
 budget:
   monthly_api_usd: 40          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). Keep the
                                # Anthropic Console limit at or above this: at the Console limit every role fails and
