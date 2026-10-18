@@ -1,4 +1,4 @@
-# alpaca-desk
+# Robocash
 
 Systematic, long-only, no-leverage US equity strategy for a small Alpaca account. Runs once a day after the close,
 holds 8-15 names for 15-60 days with broker-side bracket orders, and has a hard-coded drawdown kill switch.
