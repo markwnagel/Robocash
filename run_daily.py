@@ -40,7 +40,7 @@ from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries
 from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import can_exit_today, enforce_entry_limits, evaluate
 from desk.signals import compute_panels, rerank, snapshot
-from desk import schedule, telemetry
+from desk import schedule, shadow, telemetry
 from desk.state import load_state, save_state, write_brief
 
 log = logging.getLogger("desk")
@@ -140,6 +140,8 @@ def main() -> None:
     try:
         protect(st, broker, exits, notes)
         execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, session_open, plan.get("trims"))
+        if not args.dry_run:
+            record_shadow(today, cfg, st, entries, plan.get("shadow") or [])
     finally:
         st["manual_open"] = age_manual_actions(notes, st.get("manual_open") or {}, today)
         if not args.dry_run:
@@ -354,6 +356,9 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         t = insider_tilt(f, cfg["facts"])
         if t:
             tilt[s] = t
+    shadow_rows = [shadow.row(today, "blocked", s, float(snap.loc[s, "close"]), float(snap.loc[s, "atr"]), ecfg,
+                              reason=r, rank=int(snap.loc[s, "rank"]))
+                   for s, r in blocked.items() if s in snap.index and bool(snap.loc[s, "eligible"])]
     snap = rerank(snap, tilt, blocked)
     notes += [f"blocked {s}: {r}" for s, r in list(blocked.items())[:8]]
     if facts:
@@ -404,7 +409,10 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         if mult < 1.0:
             # One share is already the smallest expressible position; shrinking below it would drop the
             # name entirely, turning a risk-reduction rule into a silent exclusion.
+            full = sz["qty"]
             sz["qty"] = shrink_qty(sz["qty"], mult)
+            shadow_rows.append(shadow.row(today, "half_size", sym, float(row["close"]), float(row["atr"]), ecfg,
+                                          qty=full - sz["qty"], reason="implied vol >> realized", rank=int(row["rank"])))
             sz["notional"] = sz["qty"] * float(row["close"])
         cash_avail -= sz["notional"]
         entries.append({
@@ -467,8 +475,21 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             entries = []
             notes.append("analyst unavailable -> fail-safe: no new entries today")
         else:
+            before = {e["symbol"]: e for e in entries}
             entries, extra, verdict_notes = apply_verdicts(analyst_out["verdicts"], st["positions"], entries,
                                                            cfg["analyst"]["reduce_factor"])
+            kept = {e["symbol"] for e in entries}
+            reasons = {str(v.get("symbol", "")).upper(): str(v.get("reason", "")) for v in analyst_out["verdicts"]}
+            for s, e in before.items():
+                if s not in kept and s in snap.index:
+                    shadow_rows.append(shadow.row(today, "analyst_remove", s, e["price"], float(snap.loc[s, "atr"]), ecfg,
+                                                  qty=e["qty"], reason=reasons.get(s, ""), rank=e.get("rank")))
+            for s in extra:
+                pos = st["positions"].get(s) or {}
+                if s in snap.index:
+                    shadow_rows.append(shadow.row(today, "analyst_exit", s, float(snap.loc[s, "close"]),
+                                                  float(snap.loc[s, "atr"]), ecfg, qty=float(pos.get("qty") or 0),
+                                                  reason=reasons.get(s, "")))
             exits.update(extra)
             notes += verdict_notes
             if analyst_out.get("regime_mismatch"):
@@ -505,7 +526,20 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                          "notional": q * px, "add_n": int(pos.get("adds") or 0) + 1})
     return {"exits": exits, "entries": entries, "adds": adds, "trims": trims, "analyst_out": analyst_out,
             "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
-            "regime": regime_status, "regime_label": regime_label}
+            "regime": regime_status, "regime_label": regime_label, "shadow": shadow_rows}
+
+
+def record_shadow(today: date, cfg: dict, st: dict, entries: list, rows: list) -> None:
+    """Today's decisions for the shadow book (desk/shadow.py), with the entries actually staged as the control.
+    A failure here must never touch trading: it is logged and the run goes on."""
+    try:
+        ecfg = cfg["exits"]
+        staged = [shadow.row(today, "bought", e["symbol"], e["price"], (e["price"] - e["stop"]) / float(ecfg["stop_atr_multiple"]),
+                             ecfg, qty=e["qty"], reason=e.get("thesis", ""), rank=e.get("rank"))
+                  for e in entries if e["symbol"] in st["positions"]]
+        shadow.record(staged + rows)
+    except Exception as e:
+        log.warning("shadow book not written: %s", e)
 
 
 def red_team_view(payload: dict, cfg: dict) -> dict:

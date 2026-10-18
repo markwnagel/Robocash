@@ -25,7 +25,7 @@ from desk.config import ROOT, alpaca_keys, load_config
 from desk.data import cached_bars
 from desk import schedule
 from desk.notify import send, send_email
-from desk import telemetry
+from desk import shadow, telemetry
 from desk.state import BRIEFS_DIR, STATE_DIR, TRADES_FILE, atomic_write_text, load_state
 
 log = logging.getLogger("desk.audit")
@@ -38,7 +38,9 @@ Your job is adversarial toward the process: find the ways this system is losing 
 set inside normal noise for the ATR regime (high stop-out rate with positive post-exit returns); take-profit capping winners (target
 exits followed by large continued gains); time or decay exits that sell winners; entries after gap-ups (poor fills); correlated
 clusters; the risk governor pausing entries at the wrong times; the analyst vetoing names that then performed well (or not vetoing
-names that blew up); insufficient sample size to conclude anything.
+names that blew up); insufficient sample size to conclude anything. shadow_book replays every decision that changed what was
+bought - analyst REMOVEs, hard-filter blocks, the implied-vol half size - against the names actually bought; use it to judge those
+layers, and say when a group's sample is too small.
 
 Be quantitative and honest about statistical power - with fewer than ~30 closed trades most conclusions are noise, and you must say so.
 Propose at most 3 config changes, each as a specific key/value with the evidence, and state the backtest check the owner should run
@@ -272,6 +274,11 @@ def main() -> None:
         return
 
     briefs = sorted(BRIEFS_DIR.glob("*.md"))[-7:] if BRIEFS_DIR.exists() else []
+    try:
+        shadow_ev = shadow.evaluate(cfg)
+    except Exception as e:                 # the audit runs without it rather than not at all
+        log.warning("shadow book unavailable: %s", e)
+        shadow_ev = {"error": f"{type(e).__name__}: {e}"}
     payload = {
         "date": today.isoformat(),
         "config": (ROOT / "config.yaml").read_text(),
@@ -280,6 +287,7 @@ def main() -> None:
         "open_positions": state["positions"],
         "high_water_mark": state["high_water_mark"], "halted": state["halted"],
         "briefs": {p.stem: p.read_text()[:3000] for p in briefs},
+        "shadow_book": shadow_ev,
     }
     # Output tokens 11,960 / 11,134 / 15,022 on 09-26..10-10 against a 16k cap, then cut off at 16,000 on 10-17
     # once the 90-day window doubled the trades it reads: the reply did not parse and the week had no audit.
@@ -310,6 +318,7 @@ def main() -> None:
             lines.append(f"  {c['config_key']}: {c['current']} -> {c['proposed']}\n    why: {c['rationale']}\n    check: {c['backtest_check']}")
     lines.append("\nSTATS\n" + json.dumps(stats, indent=1))
     lines.append("\n" + trials_section(cfg))
+    lines.append("\n" + (shadow.markdown(shadow_ev) if "error" not in shadow_ev else f"SHADOW BOOK\n  unavailable: {shadow_ev['error']}"))
     text = "\n".join(lines)
     out_dir = STATE_DIR / "audits"
     out_dir.mkdir(parents=True, exist_ok=True)

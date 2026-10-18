@@ -110,6 +110,17 @@ is a prompt-injection surface. So:
   Enable it only after `scripts/build_insider_history.py` + a backtest show it helps (see below).
 - Every risk limit is enforced in `desk/risk.py` / `desk/portfolio.py`, which the LLM roles never touch.
 
+## The shadow book: what the layers on top of the engine are worth
+
+The quant engine is backtested; the AI analyst's REMOVE, the red team behind it, the headline and SEC-filing blocks,
+the earnings block and the implied-vol half size are not. Each desk run appends every decision that changed what was
+bought to `state/shadow/book.jsonl` (local, not committed), with the day's buys as the control group. The weekly audit
+replays each one with the desk's own bracket (stop 2x ATR, 3R target, 60-day max hold) and against SPY, and shows the
+groups side by side (`desk/shadow.py`). The retirement rule was set before any data (`shadow.min_closed: 30`): a group
+whose kept-out names did at least as well as the names bought, over 30 closed brackets, is flagged for retirement -
+the owner decides. Blocked names count once per four weeks. `scripts/backfill_shadow.py` seeded the book from the
+briefs of 2026-09-14 to 10-16; candidates the analyst vetoed before staging are recorded only from 2026-10-19.
+
 ## Setup
 
 ```bash

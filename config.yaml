@@ -202,6 +202,11 @@ notify:
   webhook_url_env: DESK_WEBHOOK_URL
   webhook_payload_key: text
 
+shadow:                        # desk/shadow.py: every veto, block and half size, replayed against what was bought
+  min_closed: 30               # pre-registered: once a group has this many closed brackets and the names it kept out
+                               # did at least as well as the names bought, the audit flags it for retirement. Set
+                               # 2026-10-17 before any data (engineering review); the owner decides, code never does.
+
 budget:
   monthly_api_usd: 40          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). Keep the
                                # Anthropic Console limit at or above this: at the Console limit every role fails and
