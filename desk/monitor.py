@@ -132,7 +132,7 @@ def role_signals(events: list) -> dict:
             "contract": {k: sum(x.get(k) or 0 for x in o)
                          for k in ("brief_over_limit", "severity_out_of_range", "fell_back", "trimmed_for_length",
                                    "high_severity", "crowded_unsupported", "web_only_capped", "web_undated_capped", "web_citations",
-                                   "web_citations_dated", "flagged")
+                                   "web_citations_dated", "flagged", "empty_reply")
                          if any(k in x for x in o)},
             "web_citation_max_age_days": max((x["web_citation_max_age_days"] for x in o
                                               if x.get("web_citation_max_age_days") is not None), default=None),
