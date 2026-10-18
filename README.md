@@ -77,6 +77,9 @@ run_daily.py (16:45 ET, weekdays)
                     as a GTC OCO (stop + target). Two traps this hides: a resting stop sits in status
                     "held", which a status=OPEN query does NOT return, and a market sell carries neither
                     stop_price nor limit_price - a checker filtering on those reports a false "unprotected".
+                    The bracket is priced from the signal-day close (the fill is not known yet); on the run
+                    that first sees the fill, the stop and target move to the same distances from the fill
+                    price, as the backtest measures them, before that evening's GTC protection is placed.
                     A holding already below its stop with nothing resting is closed outright. A holding
                     with no stop on record (adopted from the broker) or whose re-placement is rejected is a
                     MANUAL ACTION note in every brief and a SEV1 monitor alarm until it is fixed.

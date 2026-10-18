@@ -166,6 +166,20 @@ class Broker:
             self.t.replace_order_by_id(leg.id, ReplaceOrderRequest(stop_price=new_stop))
         return new_stop
 
+    def move_exit_levels(self, symbol: str, stop: float, target: float | None) -> None:
+        """Re-price the resting stop (and target) legs, in either direction. raise_stop only ratchets up;
+        this is for a leg still resting at the staged level after anchor_to_fill moved the position's."""
+        from alpaca.trading.requests import ReplaceOrderRequest
+        legs = self.live_exit_orders(symbol)
+        if legs.get("error") or legs["stop"] is None:
+            raise RuntimeError(f"no readable stop leg for {symbol}")
+        if self.dry_run:
+            log.info("[dry] move exits %s -> stop %.2f tgt %s", symbol, stop, f"{target:.2f}" if target else "-")
+            return
+        self.t.replace_order_by_id(legs["stop"].id, ReplaceOrderRequest(stop_price=round(stop, 2)))
+        if target is not None and legs["target"] is not None:
+            self.t.replace_order_by_id(legs["target"].id, ReplaceOrderRequest(limit_price=round(target, 2)))
+
     def order_status(self, order_id: str) -> str | None:
         """None when the order cannot be read; the caller then waits two days before giving up on it."""
         try:
@@ -206,6 +220,30 @@ class Broker:
         return float(fills[-1].filled_avg_price)
 
 
+def anchor_to_fill(pos: dict, sym: str, fill: float) -> str | None:
+    """Move a new holding's stop and target to the fill, the same distances as staged. The bracket is priced
+    from the signal-day close because the order goes in before the fill is known, so an entry that opened low
+    carried a nearer stop than stop_atr_multiple x ATR (NTAP/FTNT/OKTA at 74-83%, all stopped within three
+    sessions - audit 2026-10-17). The backtest measures from the fill, and point-in-time that beat the signal
+    anchor on return in 3/4 starts in both windows. The bracket's own legs are DAY orders that expire at the
+    close, so the GTC protection placed this evening is the first to use these levels. Returns a brief note."""
+    ref, stop = pos.get("entry_price"), pos.get("stop")
+    if pos.get("adopted") or stop is None or not ref:
+        return None
+    ref, stop = float(ref), float(stop)
+    dist = ref - stop
+    if dist <= 0 or abs(fill - ref) < 0.005:
+        return None
+    new_stop = round(fill - dist, 2)
+    new_target = round(fill + (float(pos["target"]) - ref), 2) if pos.get("target") else None
+    note = (f"{sym} filled at {fill:.2f} vs {ref:.2f} staged: stop {stop:.2f} -> {new_stop:.2f}"
+            + (f", target {float(pos['target']):.2f} -> {new_target:.2f}" if new_target is not None else "")
+            + " (measured from the fill, as tested)")
+    pos.update(stop=new_stop, target=new_target, signal_price=ref, staged_stop=stop, staged_target=pos.get("target"),
+               anchored_to_fill=True, reanchor_pending=True)
+    return note
+
+
 def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list:
     """Reconcile state['positions'] with the broker. Returns human-readable notes."""
     notes = []
@@ -218,6 +256,9 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
                 # First sight of the fill. entry_date is when the order was staged (the evening before), so
                 # the day-trade guard needs this to know which positions were bought today.
                 pos["filled_date"] = today.isoformat()
+                moved = anchor_to_fill(pos, sym, float(live[sym]["avg_entry_price"]))
+                if moved:
+                    notes.append(moved)
             pos["filled"] = True
             pos["entry_price"] = live[sym]["avg_entry_price"]
             pos["qty"] = live[sym]["qty"]
