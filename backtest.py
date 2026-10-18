@@ -127,6 +127,10 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
     # after the close can get. disaster_atr_multiple > 0 keeps a wider resting stop under it for crashes.
     stop_on_close = ecfg.get("stop_on", "intraday") == "close"
     disaster_mult = float(ecfg.get("disaster_atr_multiple") or 0)
+    # Where the bracket is measured from. "fill" (the default here): the fill price. "signal": the signal-day close
+    # the order was staged from, as the live desk does today (desk/portfolio.py _bracket) - an entry that opens
+    # below it carries a stop nearer than stop_atr_multiple x ATR (NTAP/FTNT/OKTA at 74-83%, audit 2026-10-17).
+    signal_anchor = ecfg.get("stop_anchor", "fill") == "signal"
 
     def sell(sym, qty, px, d, reason):
         """Sell `qty` shares of a holding: all of them closes it, fewer is a trim that leaves the rest open with
@@ -190,8 +194,9 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                 p["adds"] += 1
                 p["last_add_price"] = fill
                 continue
-            stop = round(fill - stop_mult * e["atr"], 2)
-            target = round(fill + tp_r * (fill - stop), 2) if tp_r > 0 else None
+            ref = e["ref"] if signal_anchor and e.get("ref") else fill
+            stop = round(ref - stop_mult * e["atr"], 2)
+            target = round(ref + tp_r * (ref - stop), 2) if tp_r > 0 else None
             positions[sym] = {"qty": qty, "entry_price": fill, "entry_date": d, "stop": stop, "target": target,
                               "intended_risk": e.get("intended_risk"), "realized_risk": qty * (fill - stop),
                               "high_close": fill, "adds": 0, "last_add_price": fill, "initial_risk_per_share": fill - stop}
@@ -359,6 +364,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                         sz = {**sz, "qty": q, "notional": q * float(row["close"])}
                 cash_avail -= sz["notional"]
                 pending.append({"symbol": sym, "qty": sz["qty"], "limit": entry_limit(float(row["close"])), "atr": float(row["atr"]),
+                                "ref": float(row["close"]),
                                 "intended_risk": equity * pcfg["risk_per_trade_pct"] if pcfg.get("sizing") == "risk_parity" else None})
             if pyr_n:
                 # Adds are sized like a fresh unit at today's price and capped by the position limit;

@@ -84,6 +84,12 @@ exits:
                                  #   the same + a 3x ATR resting stop: 3.4% (1/4), 11.3% (0/4)
                                  # The close rule cuts stop-outs from ~43% to ~27% of trades and lifts the win rate,
                                  # but the stops it does take lose ~2 points more each. All fail the bar. Kept.
+                                 # Anchor (2026-10-17 audit): live measures the bracket from the signal-day close
+                                 # (desk/portfolio.py _bracket), the backtest from the fill, so an entry that opens
+                                 # low gets a nearer stop (NTAP/FTNT/OKTA at 74-83% of 2x ATR). Point-in-time, 4
+                                 # starts: fill-anchored beats signal-anchored on return in 3/4 starts in both
+                                 # windows (4.9% vs 4.4%/yr; 18.9% vs 16.0%), drawdown about equal. Live not changed
+                                 # yet: it needs the bracket re-set from the fill (scripts/check_audit_1017.py).
   # No re-entry cooldown. The 2026-10-10 audit proposed 5 trading days after TXG was re-bought the morning after
   # its target fill and stopped out (-$37). In the backtests the trades a cooldown would block are better than
   # average: re-buys within 5 trading days of an exit averaged +0.91% vs +0.66% for all trades (247 of 1,667,
@@ -98,6 +104,11 @@ exits:
   min_hold_days: 15
   max_hold_days: 60
   signal_decay_rank: 40      # after min_hold, exit if the name's rank falls beyond this
+                             # 2026-10-17 audit proposed 25 (5 of 5 live decay exits lost, avg -8.2% at 26 days).
+                             # Point-in-time 2018-26 / 2023-26, 4 starts (scripts/check_audit_1017.py): 20, 25 and
+                             # 30 all worse on return in 0/4 starts in both windows (25: 3.6% vs 5.0%/yr, 11.7% vs
+                             # 18.9%), drawdown mostly worse. Backtest decay exits average +2%; the live losses are
+                             # the 10-13..10-16 unwind. Kept.
   earnings_exit_days_before: 0   # >0: close a holding this many days before its confirmed earnings date,
                                  # overriding min_hold_days. OFF (0) until the backtest earns it a value:
                                  # it changes the risk profile, so it needs evidence first.
@@ -151,7 +162,7 @@ analyst:
   model: claude-opus-5
   max_web_searches: 5
   candidates_to_review: 15     # >= max_positions: entries the analyst has not reviewed are dropped
-  reduce_factor: 0.75          # shares kept on an entry the analyst marks REDUCE (floored, min 1 share;
+  reduce_factor: 1.0           # shares kept on an entry the analyst marks REDUCE (floored, min 1 share;
                                # capped at 1.0 in code so it can never enlarge). Was 0.5 until 2026-09-24:
                                # REDUCE hit 10 of the first 19 entries, leaving live at ~52% invested and
                                # 7.8% open risk against a backtest that assumes full size. Not backtestable
@@ -161,6 +172,13 @@ analyst:
                                # cut on 57% and on 90% of entries, 20 paired seeds: each won ~half the seeds and
                                # median drawdown worsened ~1-3pt. Kept. Revisit with 20+ closed trades: does
                                # REDUCE-tagged P&L differ from untagged? If not, retire the sizing arm instead.
+                               # 2026-10-17 (23 closed): it does not (-4.6% tagged, n=15, vs -6.2% untagged, n=8).
+                               # Same paired-seed design, 0.75 vs 1.0: no cut wins return in 13-17 of 20 seeds in
+                               # both windows (2018-26 median 5.2% vs 3.4%/yr) but median drawdown is 1.2-4.5pt
+                               # deeper - more exposure, not an edge. Fails the audit's own bar (< ~1pt). Owner's
+                               # call: 1.0 from 2026-10-17 - the sizing arm is retired as pre-registered above.
+                               # REDUCE is still recorded (thesis, brief) and REMOVE still vetoes; the implied-vol
+                               # half-size is unchanged.
   red_team_enabled: true
   red_team_max_web_searches: 5    # was 10; analyst was 20. Each search adds 20-35k input tokens (2026-09-29,
                                   # monitor F-19); 1-2 a run is normal, 5 caps the worst case

@@ -57,8 +57,9 @@ run_daily.py (16:45 ET, weekdays)
                     the last bar is not the latest session.
   9. RED TEAM       Claude writes the strongest bear case per name (trap type + severity) from the fact sheet
  10. ANALYST        Claude rules KEEP / REMOVE / REDUCE per name with facts + bear case in hand. Veto-only.
-                    REDUCE keeps `analyst.reduce_factor` (0.75) of an entry's shares, floored, min 1 share;
-                    capped at 1.0 in code so no config value can make a veto enlarge a position.
+                    REDUCE keeps `analyst.reduce_factor` of an entry's shares, floored, min 1 share;
+                    capped at 1.0 in code so no config value can make a veto enlarge a position. 1.0 since
+                    2026-10-17: REDUCE is recorded on the entry but no longer shrinks it (see config.yaml).
                     A REDUCE on a stock already held is a concern, not a trade: noted once, see limitations.
                     If the API call fails: no new entries today, holdings untouched. An entry it gives no
                     KEEP / REMOVE / REDUCE verdict for is dropped: nothing is bought unreviewed.

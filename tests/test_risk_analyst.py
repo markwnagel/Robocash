@@ -297,3 +297,18 @@ def test_a_large_output_cap_streams_and_a_cut_off_reply_is_called_truncated(monk
 def test_the_auditor_asks_for_room_to_finish(monkeypatch):
     import audit
     assert audit.AUDIT_MAX_TOKENS >= 48000
+
+
+def test_with_the_sizing_arm_retired_the_analyst_is_told_reduce_keeps_full_size(cfg):
+    """2026-10-17: reduce_factor 1.0 (REDUCE-tagged trades did no better than untagged at 23 closed). The brief had
+    been calling REDUCEd candidates "a smaller slot"; at 1.0 that would be false."""
+    from desk.analyst import analyst_rules, apply_verdicts
+    c = dict(cfg, analyst=dict(cfg["analyst"], reduce_factor=1.0))
+    assert "does not change the size" in analyst_rules(c)["reduce_sizing"] and "100%" in analyst_rules(c)["reduce_sizing"]
+    c75 = dict(cfg, analyst=dict(cfg["analyst"], reduce_factor=0.75))
+    assert analyst_rules(c75)["reduce_sizing"] == "REDUCE on a candidate keeps 75% of its shares"
+    e = [{"symbol": "AAA", "qty": 7, "price": 10.0, "notional": 70.0, "thesis": "rank 1"}]
+    v = [{"symbol": "AAA", "action": "REDUCE", "reason": "insider selling", "confidence": 0.6}]
+    out = apply_verdicts(v, {}, e, 1.0)
+    kept = [x for x in out[0] if x["symbol"] == "AAA"] if isinstance(out[0], list) else None
+    assert kept and kept[0]["qty"] == 7 and "insider selling" in kept[0]["thesis"]
