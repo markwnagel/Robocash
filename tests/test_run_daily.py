@@ -265,8 +265,10 @@ def test_dry_run_touches_nothing(wired, cfg):
     assert not state_mod.STATE_FILE.exists()
 
 
-def test_facts_block_and_resize_candidates(wired, cfg, panel):
+def test_facts_block_and_resize_candidates(wired, cfg, panel, monkeypatch):
     holder, sent = wired
+    cfg["facts"]["offering_block"] = True               # the hard-block path (off in config.yaml since 2026-10-17)
+    monkeypatch.setattr(run_daily, "load_config", lambda *a, **k: cfg)
     from desk.signals import compute_signals
     ranked = compute_signals(panel, cfg["signals"])
     top, second, third = list(ranked.index[:3])
@@ -813,3 +815,19 @@ def test_move_exit_levels_reprices_both_legs_in_either_direction():
     t = _T([_Order(stop_price=222.74, oid="s1", symbol="NTAP"), _Order(limit_price=288.50, oid="t1", symbol="NTAP")])
     Broker(t).move_exit_levels("NTAP", 218.51, 284.27)                     # down: raise_stop would refuse this
     assert t.replaced == [("s1", 218.51, None), ("t1", None, 284.27)]
+
+
+
+def test_with_the_offering_block_off_a_filing_is_flagged_not_blocked(wired, cfg, panel):
+    """2026-10-17: the hard block was worse against SPY point-in-time; the filing now reaches the analyst."""
+    holder, sent = wired
+    from desk.signals import compute_signals
+    assert cfg["facts"]["offering_block"] is False
+    top = compute_signals(panel, cfg["signals"]).index[0]
+    holder["facts"] = {top: {"symbol": top, "offering_filings": ["8-K item 3.02 2026-09-01"]}}
+    holder["broker"] = FakeBroker()
+    run(["--no-analyst"])
+    assert top in {s for s, *_ in holder["broker"].brackets}
+    assert f"blocked {top}" not in sent[-1]
+    st = json.loads(state_mod.STATE_FILE.read_text())
+    assert "dilutive filing flagged" in st["positions"][top]["thesis"]

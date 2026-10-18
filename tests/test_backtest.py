@@ -323,3 +323,19 @@ def test_a_signal_anchored_stop_is_measured_from_the_staged_price_not_the_fill(c
         assert abs((r.final_stop_live - r.final_stop_bt) - (ref - r.entry_price_bt)) <= 0.011
         checked += 1
     assert checked >= 5 and (both.final_stop_live != both.final_stop_bt).any()
+
+
+def test_a_recent_dilutive_filing_keeps_a_candidate_out_for_ninety_days(cfg, panel):
+    """The live dilution block (S-1 or 8-K 3.02 in the last 90 days) modelled in the backtest (review item 6)."""
+    dates = panel["close"].index
+    _, base = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    sym = base["symbol"].value_counts().index[0]                          # the name the strategy buys most
+    first = pd.Timestamp(base[base.symbol == sym]["entry_date"].min())
+    filing = first - pd.Timedelta(days=10)
+    off = pd.DataFrame({"date": [filing.date().isoformat()], "symbol": [sym]})
+    _, blocked = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, offerings=off)
+    entries = pd.to_datetime(blocked[blocked.symbol == sym]["entry_date"])
+    # No entry staged inside the 90 days after the filing (entries fill the session after the signal).
+    assert not ((entries > filing + pd.Timedelta(days=1)) & (entries <= filing + pd.Timedelta(days=91))).any()
+    _, none = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, offerings=pd.DataFrame(columns=["date", "symbol"]))
+    pd.testing.assert_frame_equal(none, base)                             # an empty history changes nothing

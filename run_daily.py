@@ -421,7 +421,8 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             "atr_pct": float(row["atr_pct"]), **sz,
             "thesis": f"rank {int(row['rank'])}, 6m mom {row['momentum']:.0%}, 20d {row['short']:.0%}"
                       + (" | half size: implied vol >> realized" if mult < 1.0 else "")
-                      + (" | insider buying tilt" if sym in tilt else ""),
+                      + (" | insider buying tilt" if sym in tilt else "")
+                      + (" | dilutive filing flagged" if (facts.get(sym) or {}).get("offering_filings") else ""),
         })
 
     max_new = pcfg.get("max_new_entries_per_day")

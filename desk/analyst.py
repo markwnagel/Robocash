@@ -96,8 +96,13 @@ def analyst_rules(cfg: dict) -> dict:
         "thesis_at_entry": "written on entry_date; its figures are from that day",
         "filings_vs_headlines": ("offering_filings and shelf_filings come from SEC filings in the last 90 days - an 8-K "
                                  "item 3.02 is any unregistered share issuance, including shares paid for an acquisition; "
-                                 "cls_* flags come from headlines. The two can disagree without either being wrong. Code "
-                                 "blocks candidates on offering_filings; holdings are never blocked by facts. "
+                                 "cls_* flags come from headlines. The two can disagree without either being wrong. "
+                                 + ("Code blocks candidates on offering_filings" if cfg["facts"].get("offering_block", True)
+                                    else "Code does NOT block on offering_filings (backtested: the hard block cost "
+                                         "return against SPY, because most 8-K 3.02s are acquisition shares or "
+                                         "convertible notes): judge each one - REMOVE a candidate when the filing is a "
+                                         "real dilutive equity sale, not when it is shares paid for an acquisition")
+                                 + "; holdings are never blocked by facts. "
                                  "shelf_registration (last 3 years) and prospectus_supplements_12m (424B filings, last 12 "
                                  "months) show standing capacity to sell securities: a 424B5 under a shelf often means an "
                                  "at-the-market share program, which sells without a filing per sale - dilution risk, not "

@@ -65,7 +65,7 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                  earnings: pd.DataFrame | None = None, insider: pd.DataFrame | None = None,
                  regime_state: pd.Series | None = None, panels: dict | None = None,
                  members: pd.DataFrame | None = None, entry_rng: np.random.Generator | None = None,
-                 veto: dict | None = None) -> tuple:
+                 veto: dict | None = None, offerings: pd.DataFrame | None = None) -> tuple:
     """panels: precomputed compute_panels(panel, cfg['signals']) - pass it when running the same panel and
     signal settings many times (--stagger), since it is the bulk of each run's cost.
 
@@ -111,6 +111,16 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                  .groupby(["date", "symbol"])["net_usd"].sum().unstack(fill_value=0.0).resample("D").sum())
         ins = daily.rolling(30, min_periods=1).sum().reindex(dates, method="ffill").fillna(0.0)
     earn_window = pd.Timedelta(days=fcfg["exclude_earnings_within_days"])
+    # The live dilution block (desk/facts.py candidate_blockers, desk/edgar.py offering_filings): an S-1 or an
+    # 8-K item 3.02 filed in the last 90 days keeps a candidate out. offerings: date, symbol rows from
+    # scripts/build_offering_history.py; None = not modelled, as every run before 2026-10-17.
+    off_by_sym = {}
+    if offerings is not None and len(offerings):
+        for r in offerings.itertuples():
+            off_by_sym.setdefault(str(r.symbol).upper(), []).append(pd.Timestamp(r.date))
+        for v in off_by_sym.values():
+            v.sort()
+    off_window = pd.Timedelta(days=90)
 
     cash, positions, pending, trades, curve = capital, {}, [], [], []
     hwm, ath, last_equity, halted_until = capital, capital, capital, None
@@ -331,12 +341,14 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                 esnap.loc[el, "score"] = entry_rng.random(int(el.sum()))
                 esnap.loc[el, "rank"] = esnap.loc[el, "score"].rank(ascending=False, method="first")
                 esnap = esnap.sort_values("rank")
-            if earn_by_sym or ins is not None:
+            if earn_by_sym or ins is not None or off_by_sym:
                 blocked, tilt = {}, {}
                 block_end = d + earn_window
                 for sym in esnap.index[esnap["eligible"].values][: fcfg["candidate_pool"] * 2]:
                     if _report_between(earn_by_sym.get(sym, []), d, block_end):
                         blocked[sym] = "earnings"
+                    elif off_by_sym.get(sym) and any(d - off_window < t <= d for t in off_by_sym[sym]):
+                        blocked[sym] = "offering"
                     if ins is not None and sym in ins.columns and ins.at[d, sym] >= fcfg["insider_min_net_usd"]:
                         tilt[sym] = float(fcfg["insider_tilt_weight"])
                 esnap = rerank(esnap, tilt, blocked)
