@@ -48,7 +48,9 @@ def candidate_blockers(f: dict, fcfg: dict) -> list:
         # None normally means "no report in the window"; after a failed lookup it means "unknown", and an
         # unknown date must not pass the one hard block that protects a new position from a report gap.
         reasons.append("earnings date lookup failed - not bought blind")
-    if f.get("offering_filings"):
+    if f.get("offering_filings") and fcfg.get("offering_block", True):
+        # Off from 2026-10-17 (facts.offering_block): point-in-time it was worse against SPY in 7 of 8 starts. The
+        # filings stay on the fact sheet for the analyst, whose REMOVE covers a real offering (config.yaml).
         reasons.append("dilutive filing: " + "; ".join(f["offering_filings"][:2]))
     if f.get("cls_offering"):
         reasons.append("headline: offering")

@@ -70,7 +70,10 @@ def test_candidate_blockers(cfg):
     assert candidate_blockers({"earnings_in_days": inside}, fcfg) == [f"earnings in {inside}d"]
     assert candidate_blockers({"earnings_in_days": fcfg["exclude_earnings_within_days"] + 1}, fcfg) == []
     assert candidate_blockers({"earnings_in_days": None}, fcfg) == []
-    assert any("dilutive" in r for r in candidate_blockers({"offering_filings": ["S-1 2026-09-01"]}, fcfg))
+    assert any("dilutive" in r for r in candidate_blockers({"offering_filings": ["S-1 2026-09-01"]},
+                                                           dict(fcfg, offering_block=True)))
+    # Off since 2026-10-17 (backtested worse against SPY): the filing is the analyst's to judge, not a block.
+    assert candidate_blockers({"offering_filings": ["S-1 2026-09-01"]}, dict(fcfg, offering_block=False)) == []
     # A shelf filing alone is an analyst flag, never a hard block.
     assert candidate_blockers({"shelf_filings": ["S-3ASR 2026-08-13"]}, fcfg) == []
     assert any("acquisition" in r for r in candidate_blockers({"cls_acquisition_target": True}, fcfg))
