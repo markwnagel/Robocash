@@ -64,6 +64,9 @@ AUDIT_SCHEMA = {
 }
 
 
+AUDIT_MAX_TOKENS = 64000
+
+
 def trade_stats(trades: pd.DataFrame, closes: pd.DataFrame | None, post_days) -> dict:
     """post_days: one window or several (config audit.post_exit_days). Several, because a 20-day window left
     every post-exit field empty for the first month of live trading (audit 2026-10-03), and on ~700 backtest
@@ -266,8 +269,10 @@ def main() -> None:
         "high_water_mark": state["high_water_mark"], "halted": state["halted"],
         "briefs": {p.stem: p.read_text()[:3000] for p in briefs},
     }
+    # Output tokens 11,960 / 11,134 / 15,022 on 09-26..10-10 against a 16k cap, then cut off at 16,000 on 10-17
+    # once the 90-day window doubled the trades it reads: the reply did not parse and the week had no audit.
     out = _call_json(AUDIT_SYSTEM, json.dumps(payload, indent=1, default=str), AUDIT_SCHEMA, acfg["model"], 0,
-                     role="auditor")
+                     role="auditor", max_tokens=AUDIT_MAX_TOKENS)
     if not out:
         msg = f"AUDIT {today}: auditor unavailable. Stats: {json.dumps(stats)}"
         send(msg, cfg)
