@@ -3,8 +3,16 @@
 # them as directional; see README "Reproducible backtests". Figures dated 2026-09-24 are reproducible.
 # All backtest figures in these comments come from the survivor-list universe (today's 800 names). The
 # point-in-time study (robustness.py, 2018-2026, delisted names included) reverses several of them - e.g.
-# 15 target positions and regime.off_liquidate both beat this config there. See README "Point-in-time
+# 15 target positions and regime.off_liquidate both beat this config there on return. See README "Point-in-time
 # robustness study" before changing a setting on the strength of a comment below.
+# Re-baseline 2026-10-17 (scripts/check_rebaseline.py; rule fixed before the run: six-month excess over SPY better
+# in >=3/4 starts in both windows, median drawdown no worse in either). Median of 4 starts, 2018-26 / 2023-26:
+#   today              excess -4.3 / +3.7pt   max DD -32.1% / -18.7%
+#   15 positions       excess -3.7 / +4.5pt   (better 2/4, 3/4)   max DD -32.4% / -20.4%   CAGR better 4/4, 3/4
+#   off_liquidate      excess -4.4 / +3.4pt   (2/4, 0/4)          max DD -22.5% / -16.1%   (better 4/4 both)
+#   both               excess -5.5 / -0.1pt   (0/4, 0/4)          max DD -26.3% / -17.2%
+# None passes; today's config stays. 15 positions is the near miss (return, not excess, and a slightly deeper
+# drawdown); off_liquidate cuts drawdown by a third in 2018-26 without beating SPY - a risk choice, not edge.
 account:
   paper: true
   starting_capital: 10000
