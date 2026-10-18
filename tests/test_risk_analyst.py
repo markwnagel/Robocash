@@ -265,3 +265,35 @@ def test_a_brief_naming_a_regime_the_desk_is_not_in_is_caught(monkeypatch):
     out = analyst.review({"regime": {"label": "risk-on", "state": "neutral"}}, {"analyst": {"model": "m", "max_web_searches": 0}})
     assert out["regime_mismatch"] and events[-1]["brief_regime_mismatch"] is True
     assert "regime.label word for word" in analyst.ANALYST_SYSTEM
+
+
+def test_a_large_output_cap_streams_and_a_cut_off_reply_is_called_truncated(monkeypatch):
+    """Audit 2026-10-17: the auditor's reply hit the 16k cap mid-JSON and was logged as a parse error. Callers
+    can now raise the cap (streamed, as the SDK requires for long requests); a cut-off reply says so."""
+    from types import SimpleNamespace as NS
+    from desk import analyst
+    calls, outcomes = [], []
+    good = NS(stop_reason="end_turn", content=[NS(type="text", text='{"a": 1}')])
+    cut = NS(stop_reason="max_tokens", content=[NS(type="text", text='{"a": ')])
+
+    class _Stream:
+        def __init__(self, r): self.r = r
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_final_message(self): return self.r
+
+    class _Client:
+        def __init__(self, *a, **k): self.messages = self
+        def create(self, **k): calls.append(("create", k["max_tokens"])); return cut
+        def stream(self, **k): calls.append(("stream", k["max_tokens"])); return _Stream(good)
+
+    monkeypatch.setattr(analyst.anthropic, "Anthropic", _Client)
+    monkeypatch.setattr(analyst.telemetry, "llm_call", lambda role, model, started, resps, **k: outcomes.append(k["outcome"]))
+    assert analyst._call_json("s", "u", {}, "m", 0, role="auditor", max_tokens=64000) == {"a": 1}
+    assert analyst._call_json("s", "u", {}, "m", 0) is None          # the desk roles: unchanged 16k, no streaming
+    assert calls == [("stream", 64000), ("create", 16000)] and outcomes == ["ok", "truncated"]
+
+
+def test_the_auditor_asks_for_room_to_finish(monkeypatch):
+    import audit
+    assert audit.AUDIT_MAX_TOKENS >= 48000

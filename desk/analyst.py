@@ -206,7 +206,7 @@ def prompt_composition(payload: dict) -> dict:
 
 
 def _call_json(system: str, user_text: str, schema: dict, model: str, max_searches: int,
-               role: str = "analyst", composition: dict | None = None) -> dict | None:
+               role: str = "analyst", composition: dict | None = None, max_tokens: int = 16000) -> dict | None:
     """Returns None on ANY failure and never raises. The callers treat None as 'fail closed - no new
     entries', but an exception escaping here aborts run_daily before the exits and the protective-stop
     re-placement, leaving positions naked. Catching anthropic.APIError alone is not enough: an
@@ -217,10 +217,14 @@ def _call_json(system: str, user_text: str, schema: dict, model: str, max_search
     try:
         client = anthropic.Anthropic()
         for _ in range(6):
-            resp = client.messages.create(
-                model=model, max_tokens=16000, system=system, tools=tools, messages=messages,
-                output_config={"format": {"type": "json_schema", "schema": schema}},
-            )
+            req = dict(model=model, max_tokens=max_tokens, system=system, tools=tools, messages=messages,
+                       output_config={"format": {"type": "json_schema", "schema": schema}})
+            if max_tokens > 16000:
+                # A cap this large can outlast a plain request's timeout; streaming is how the SDK allows it.
+                with client.messages.stream(**req) as stream:
+                    resp = stream.get_final_message()
+            else:
+                resp = client.messages.create(**req)
             responses.append(resp)
             if resp.stop_reason == "pause_turn":
                 messages.append({"role": "assistant", "content": resp.content})
@@ -231,7 +235,12 @@ def _call_json(system: str, user_text: str, schema: dict, model: str, max_search
                                   **(composition or {}))
                 return None
             out = _parse("".join(b.text for b in resp.content if b.type == "text"))
-            telemetry.llm_call(role, model, started, responses, outcome="ok" if out is not None else "parse_error",
+            if resp.stop_reason == "max_tokens":
+                # Cut off mid-answer: the JSON cannot parse. Said as such, not as a parse error (audit 2026-10-17).
+                log.error("%s reply cut off at max_tokens (%d)", role, max_tokens)
+            telemetry.llm_call(role, model, started, responses,
+                               outcome="ok" if out is not None else ("truncated" if resp.stop_reason == "max_tokens"
+                                                                     else "parse_error"),
                                input_chars=len(user_text), **(composition or {}))
             return out
         log.error("still paused after retries")
