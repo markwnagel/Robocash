@@ -339,3 +339,28 @@ def test_a_recent_dilutive_filing_keeps_a_candidate_out_for_ninety_days(cfg, pan
     assert not ((entries > filing + pd.Timedelta(days=1)) & (entries <= filing + pd.Timedelta(days=91))).any()
     _, none = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, offerings=pd.DataFrame(columns=["date", "symbol"]))
     pd.testing.assert_frame_equal(none, base)                             # an empty history changes nothing
+
+
+def test_the_cash_sweep_holds_idle_cash_in_spy_without_leverage(cfg, panel):
+    """Review item 7: idle cash above the floor and tonight's orders goes into SPY; off, nothing changes."""
+    dates = panel["close"].index
+    spy = panel["close"]["S00"]
+    base, t0 = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    same, t1 = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, sweep_px=spy)       # disabled in config
+    pd.testing.assert_frame_equal(base, same)
+    on = dict(cfg, portfolio=dict(cfg["portfolio"], cash_sweep={"enabled": True, "band_pct": 0.02}))
+    curve, trades = run_backtest(panel, on, dates[0], dates[-1], 10000.0, 10, 5, sweep_px=spy)
+    assert (curve["cash"] >= -1e-6).all()                                     # never borrows
+    assert (curve["cash"] / curve["equity"]).mean() < (base["cash"] / base["equity"]).mean()
+    assert (curve["cash"] / curve["equity"]).median() < (base["cash"] / base["equity"]).median()   # floor + staged orders
+    assert len(trades) > 0
+
+
+def test_the_sweep_funds_new_entries_instead_of_starving_them(cfg, panel):
+    """First version budgeted entries from cash alone, so a swept account bought almost nothing new."""
+    dates = panel["close"].index
+    spy = panel["close"]["S00"]
+    _, base = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    on = dict(cfg, portfolio=dict(cfg["portfolio"], cash_sweep={"enabled": True, "band_pct": 0.02}))
+    _, swept = run_backtest(panel, on, dates[0], dates[-1], 10000.0, 10, 5, sweep_px=spy)
+    assert len(swept) >= 0.8 * len(base)
