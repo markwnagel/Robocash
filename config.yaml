@@ -146,6 +146,13 @@ facts:
                                      # 60d blocks the whole universe for two months of three. Trades that
                                      # span a report are 75% of profit - the block only keeps a day-old
                                      # stop from being gapped over. Elevated implied vol still halves size.
+  # Dilution block (desk/facts.py candidate_blockers; not a key here): an S-1 or 8-K item 3.02 in the last 90 days
+  # hard-blocks a candidate. Backtested 2026-10-17 (scripts/check_offering_block.py; filings from EDGAR for 99.9% of
+  # point-in-time membership spells, scripts/build_offering_history.py), 4 starts per window, block vs none:
+  #   2018-26 CAGR 7.0% vs 4.9% (better 2/4), 6m excess vs SPY -4.2 vs -4.3pt (worse 3/4), max DD -36% vs -32%
+  #   2023-26 CAGR 18.3% vs 18.9% (better 1/4), 6m excess +2.0 vs +3.7pt (worse 4/4), max DD -19.2% vs -18.7%
+  # Worse against SPY in 7 of 8 starts and deeper drawdown in 6 of 8, small either way: it does not earn its place
+  # in the backtest. Kept live pending the owner's decision; the shadow book measures it live (blocked:filing).
   iv_over_rv_reduce_at: 1.5          # ATM implied vol / 20d realized vol above this -> half size
   social_z_exclude_at: 3.0           # StockTwits message-rate z-score above this -> block (crowding/pump guard)
   social_enabled: false              # OFF: the z-score needs ~15 sessions of its own history, and an inert

@@ -14,6 +14,7 @@ state/*
 state/history/*
 !state/history/universe_bt*.json
 !state/history/earnings.csv
+!state/history/offerings.csv
 !state/history/trials.jsonl
 !state/history/live_reference.json
 # The point-in-time universe definition (robustness.py); its download caches and ~300MB panel are rebuilt.

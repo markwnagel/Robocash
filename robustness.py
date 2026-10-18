@@ -133,7 +133,8 @@ def run_job(job: dict) -> dict:
         job.get("slippage", 10), 20, regime=reg, earnings=_G["earnings"], regime_state=reg_state,
         panels=cache[key], members=_G["members"][job.get("universe", "pit")],
         entry_rng=rng if job.get("mode") == "random" else None,
-        veto={**FRICTIONS, **job.get("frictions", {}), "rng": rng} if job.get("mode") == "frictions" else None)
+        veto={**FRICTIONS, **job.get("frictions", {}), "rng": rng} if job.get("mode") == "frictions" else None,
+        offerings=_G.get("offerings") if job.get("offerings") else None)
     return {"name": job["name"], "group": job["group"], "job": {k: v for k, v in job.items() if k != "overrides"},
             "overrides": [[".".join(p), v] for p, v in job.get("overrides", [])],
             "equity": curve["equity"], "n_positions": curve["n_positions"], "cash": curve["cash"],
