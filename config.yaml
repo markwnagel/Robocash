@@ -64,6 +64,8 @@ portfolio:
     #   2023-26 CAGR 19.0% vs 18.9% (better 2/4), 6m excess +4.9 vs +3.7pt (better 3/4), max DD -22.3% vs -18.7% (0/4)
     # Closer to SPY in both windows, mostly by adding exposure, not edge: invested 70-77% -> 79-81%, and the 2023-26
     # drawdown is deeper in every start. Misses the >=3/4 return bar in 2023-26. A 5% band was no better.
+    # Owner's decision 2026-10-17: not built live. reduce_factor 1.0 and offering_block false (both from 10-19)
+    # should cut idle cash on their own. Revisit ~2026-11-06: if live cash still averages over ~25%, build it.
   max_new_entries_per_day: 4  # spreads entry timing. Backtested 2026-09-12 (3y): unlimited = +104%/DD -27.7%
                               # with six hard-floor hits vs +247%/-20.5% at 4/day - batch entries share one
                               # day's gap risk and trip the kill switch together. Keep.
