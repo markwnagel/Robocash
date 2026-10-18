@@ -301,3 +301,25 @@ def test_the_resting_disaster_stop_still_fires_intraday_under_a_close_stop(cfg, 
     assert set(trades.reason) & {"stop", "stop-gap"}
     _, default = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
     assert "stop-close" not in set(default.reason)
+
+
+
+def test_a_signal_anchored_stop_is_measured_from_the_staged_price_not_the_fill(cfg, panel):
+    """The live desk sets the bracket from the signal-day close (desk/portfolio.py _bracket); the backtest from the
+    fill. stop_anchor: signal models live, so the two can be compared (audit 2026-10-17). Same ATR distance, so
+    for the same entry the two stops differ by exactly (signal close - fill)."""
+    dates = panel["close"].index
+    _, live = run_backtest(panel, _exits(cfg, stop_anchor="signal"), dates[0], dates[-1], 10000.0, 10, 5)
+    _, bt = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5)
+    first = lambda t: t.sort_values("exit_date").drop_duplicates(["symbol", "entry_date"]).set_index(["symbol", "entry_date"])
+    both = first(live).join(first(bt), lsuffix="_live", rsuffix="_bt", how="inner")
+    assert len(both) >= 5
+    checked = 0
+    for (sym, entry), r in both.iterrows():
+        if abs(r.entry_price_live - r.entry_price_bt) > 1e-9:
+            continue                                   # paths diverged; only like-for-like fills compare
+        i = dates.get_loc(pd.Timestamp(entry))
+        ref = panel["close"].loc[dates[i - 1], sym]
+        assert abs((r.final_stop_live - r.final_stop_bt) - (ref - r.entry_price_bt)) <= 0.011
+        checked += 1
+    assert checked >= 5 and (both.final_stop_live != both.final_stop_bt).any()
