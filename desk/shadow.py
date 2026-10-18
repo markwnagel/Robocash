@@ -197,7 +197,14 @@ def evaluate(cfg: dict, data=None, book: pd.DataFrame | None = None) -> dict:
     spy = panel["close"]["SPY"].dropna()
     df = outcomes(book, panel, spy, int(cfg["exits"]["max_hold_days"]))
     s = summary(df)
-    return {"summary": s, "flags": retirement_due(s, cfg.get("shadow") or {}), "rows": len(df), "since": first.isoformat()}
+    from .config import release
+    rel = release(cfg)
+    cur = {}
+    if rel["name"] and rel["since"] and len(df):
+        # The current release's decisions only: made after its cut (config release.since).
+        cur = summary(df[pd.to_datetime(df["date"]) > pd.Timestamp(rel["since"])])
+    return {"summary": s, "flags": retirement_due(s, cfg.get("shadow") or {}), "rows": len(df), "since": first.isoformat(),
+            "release": rel["name"], "release_summary": cur}
 
 
 def markdown(ev: dict) -> str:
@@ -205,6 +212,12 @@ def markdown(ev: dict) -> str:
     if not ev:
         return "SHADOW BOOK\n  empty - decisions are recorded from 2026-10-19"
     lines = [f"SHADOW BOOK (decisions since {ev['since']}; desk bracket replayed on daily bars)"]
+    if ev.get("release"):
+        rs = ev.get("release_summary") or {}
+        lines.append(f"  {ev['release']} only: " + ("; ".join(f"{g} n {v['n']} closed {v['n_closed']}"
+                                                             + (f" {v['bracket_ret_mean']:+.1%}" if v["bracket_ret_mean"] is not None else "")
+                                                             for g, v in sorted(rs.items())) or "no decisions yet"))
+        lines.append("  all releases:")
     for g, v in sorted(ev["summary"].items()):
         br = f"{v['bracket_ret_mean']:+.1%}" if v["bracket_ret_mean"] is not None else "n/a"
         ex = f"{v['excess_20d_mean']:+.1%}" if v["excess_20d_mean"] is not None else "n/a"

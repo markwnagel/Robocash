@@ -137,12 +137,25 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
     spy_ret = float(spy[spy.index <= pd.Timestamp(end)].iloc[-1] / spy[spy.index <= pd.Timestamp(start)].iloc[-1] - 1)
     bought = book[book["kind"] == "bought"] if len(book) else pd.DataFrame(columns=["date", "symbol"])
     ent = compare_entries(log, bought, book, panel["close"].index, last_day=end.isoformat())
+    from .config import release
+    rel = release(cfg)
+    since = {}
+    cut = pd.Timestamp(rel["since"]) if rel["name"] and rel["since"] else None
+    if cut is not None and cut < pd.Timestamp(end) and (eq.index <= cut).any() and (bt_eq.index <= cut).any():
+        # The same window for both: from the cut's close. The replay carries its own positions across the cut, as
+        # live carries v1's - so this compares the two books under the new release, not two fresh starts.
+        s_cut = spy[spy.index <= cut].iloc[-1]
+        since = {"release": rel["name"], "from": rel["since"].isoformat(),
+                 "live_return": round(live_last / float(eq["equity"][eq.index <= cut].iloc[-1]) - 1, 4),
+                 "backtest_return": round(bt_last / float(bt_eq[bt_eq.index <= cut].iloc[-1]) - 1, 4),
+                 "spy_return": round(float(spy[spy.index <= pd.Timestamp(end)].iloc[-1] / s_cut - 1), 4)}
     return {"window": f"{start} to {end}", "live_return": round(live_last / capital - 1, 4),
             "backtest_return": round(bt_last / float(bt_eq.iloc[0]) - 1, 4), "spy_return": round(spy_ret, 4),
             "equity_gap_pts": round(100 * (live_last / capital - bt_last / float(bt_eq.iloc[0])), 2),
             "live_cash_share": round(float((eq["cash"] / eq["equity"]).mean()), 3),
             "backtest_cash_share": round(float((curve["cash"] / curve["equity"]).mean()), 3),
-            "entries": ent, "backtest_trades_closed": int(len(trades)), "backtest_entries": len(log)}
+            "entries": ent, "backtest_trades_closed": int(len(trades)), "backtest_entries": len(log),
+            "since_release": since}
 
 
 def alarms(res: dict, cfg: dict, today: date) -> list:
@@ -166,6 +179,9 @@ def markdown(res: dict) -> list:
     e = res["entries"]
     lines = ["## Live vs backtest", f"- {res['window']}: live {res['live_return']:+.1%}, backtest {res['backtest_return']:+.1%} "
              f"(gap {res['equity_gap_pts']:+.1f} pts), SPY {res['spy_return']:+.1%}",
+             *([f"- since {res['since_release']['release']} ({res['since_release']['from']} close): live "
+                f"{res['since_release']['live_return']:+.1%}, backtest {res['since_release']['backtest_return']:+.1%}, "
+                f"SPY {res['since_release']['spy_return']:+.1%}"] if res.get("since_release") else []),
              f"- cash: live {res['live_cash_share']:.0%}, backtest {res['backtest_cash_share']:.0%}",
              f"- entries: {e['both']} in both, {e['backtest_only']} backtest only, {e['live_only']} live only "
              f"(overlap {e['overlap']})"]

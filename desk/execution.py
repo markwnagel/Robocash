@@ -10,7 +10,7 @@ from alpaca.trading.requests import (GetOrdersRequest, LimitOrderRequest, Market
                                      TakeProfitRequest)
 
 from . import telemetry
-from .state import record_trade
+from .state import LEGACY_RELEASE, record_trade
 
 log = logging.getLogger("desk.exec")
 DEAD_ORDER_STATUSES = {"expired", "canceled", "rejected", "replaced", "done_for_day", "stopped", "suspended"}
@@ -387,4 +387,6 @@ def _log_close(pos: dict, sym: str, exit_price: float, today: date, reason: str)
         "pnl_pct": round(exit_price / entry_price - 1, 4) if entry_price else 0,
         "hold_days": (today - entry).days, "exit_reason": reason, "thesis": pos.get("thesis", ""),
         "stop": pos.get("stop"), "target": pos.get("target"),
+        # A position opened before release tracking was held across the v1 -> v2 cut: v1's pick, closed under v2.
+        "release": pos.get("release") or f"{LEGACY_RELEASE} (carried)",
     })

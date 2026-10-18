@@ -110,6 +110,20 @@ is a prompt-injection surface. So:
   Enable it only after `scripts/build_insider_history.py` + a backtest show it helps (see below).
 - Every risk limit is enforced in `desk/risk.py` / `desk/portfolio.py`, which the LLM roles never touch.
 
+## Releases
+
+A release is a named version of the strategy, with results reported from its own start (`config.yaml` `release`,
+git tags `v1.0`, `v2.0`, ...). v1.0 is the code of the 2026-10-16 desk run; v2.0 is the 2026-10-17 engineering
+review, counted from the 10-16 close ($9,361) - its first desk run is 2026-10-19.
+
+- The daily email leads its performance table with "Since v2.0" beside since inception, both against SPY.
+- New positions, trade-log rows (`release` column) and shadow-book entries carry the release. Positions held at
+  the cut are v1's picks: they close as `v1.0 (carried)`. Trades closed before the column existed are `v1.0`.
+- The live-vs-backtest section and the weekly audit report the current release on its own, beside the whole history.
+- Risk limits never reset at a release: the kill switch, high-water mark and cumulative floor are continuous.
+
+To cut v3: change `release.name` and `release.since` (the last close under the old version), merge, and tag the merge.
+
 ## The shadow book: what the layers on top of the engine are worth
 
 The quant engine is backtested; the AI analyst's REMOVE, the red team behind it, the headline and SEC-filing blocks,

@@ -30,7 +30,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide
 
 from desk.analyst import analyst_rules, apply_verdicts, red_team, review
-from desk.config import alpaca_keys, load_config, require_paper
+from desk.config import alpaca_keys, load_config, release, require_paper
 from desk.data import SESSION_DONE, build_universe, cached_bars
 from desk.execution import Broker, sync_positions
 from desk.facts import FactBuilder, candidate_blockers, compact, insider_tilt, size_multiplier
@@ -68,7 +68,7 @@ def main() -> None:
     cfg = load_config()
     today = date.today()
     st = load_state()
-    telemetry.note(dry_run=args.dry_run)
+    telemetry.note(dry_run=args.dry_run, release=release(cfg)["name"])
     if args.resume:
         if st.get("hard_halted") and not args.reset_hwm:
             msg = (f"HARD FLOOR halt ({st.get('halt_reason')}) is not cleared by --resume alone. "
@@ -538,7 +538,8 @@ def record_shadow(today: date, cfg: dict, st: dict, entries: list, rows: list) -
         staged = [shadow.row(today, "bought", e["symbol"], e["price"], (e["price"] - e["stop"]) / float(ecfg["stop_atr_multiple"]),
                              ecfg, qty=e["qty"], reason=e.get("thesis", ""), rank=e.get("rank"))
                   for e in entries if e["symbol"] in st["positions"]]
-        shadow.record(staged + rows)
+        name = release(cfg)["name"]
+        shadow.record([dict(r, release=name) for r in staged + rows])
     except Exception as e:
         log.warning("shadow book not written: %s", e)
 
@@ -661,6 +662,7 @@ def execute(args, cfg, today, st, broker, acct, exits, entries, adds, notes, ses
                 "exit_by": (today + timedelta(days=ecfg["max_hold_days"])).isoformat(),
                 "high_close": e["price"], "adds": 0, "last_add_price": e["price"],
                 "initial_risk_per_share": round(e["price"] - e["stop"], 4),
+                "release": release(cfg)["name"],
             }
             save_state(st)
     for a in adds:
@@ -760,7 +762,8 @@ def age_manual_actions(notes: list, open_since: dict, today: date) -> dict:
 def render_brief(mode, today, acct, decision, st, exits, entries, notes, headline, cfg, adds=None, target=None) -> str:
     pcfg, ecfg, rcfg = cfg["portfolio"], cfg["exits"], cfg["risk"]
     eq = acct["equity"]
-    lines = [f"DESK BRIEF {today.isoformat()} [{mode}]"]
+    rel = release(cfg)["name"]
+    lines = [f"DESK BRIEF {today.isoformat()} [{mode}]" + (f" {rel}" if rel else "")]
     if headline:
         lines.append(headline)
     lines.append(
