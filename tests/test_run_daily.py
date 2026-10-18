@@ -746,3 +746,70 @@ def test_manual_actions_carry_the_day_they_were_first_raised():
     assert not d2[1].endswith("]")                                    # a different, new item
     open3 = age_manual_actions(["regime note"], open2, date(2026, 9, 28))
     assert open3 == {}                                                # resolved items close
+
+
+def _held(price, qty=5.0):
+    return {"avg_entry_price": price, "qty": qty, "current_price": price, "market_value": price * qty,
+            "unrealized_plpc": 0.0}
+
+
+def test_a_new_holding_s_stop_and_target_are_measured_from_its_fill():
+    """Audit 2026-10-17: NTAP staged at 239.18 with stop 222.74 (16.44 = 2x ATR) filled at 234.95, so it rested
+    12.21 under the fill - 74% of the intended distance - and stopped out within three sessions. The backtest
+    measures from the fill, and that beat the signal anchor point-in-time."""
+    from desk.execution import sync_positions
+    st = {"positions": {"NTAP": {"entry_date": "2026-10-12", "entry_price": 239.18, "qty": 1, "filled": False,
+                                 "order_id": "e1", "stop": 222.74, "target": 288.50}}}
+    notes = sync_positions(st, FakeBroker(), {"NTAP": _held(234.95, 1.0)}, date(2026, 10, 13))
+    p = st["positions"]["NTAP"]
+    assert p["stop"] == 218.51 and p["target"] == 284.27                    # same 16.44 / 49.32 from the fill
+    assert p["entry_price"] == 234.95 and p["signal_price"] == 239.18 and p["staged_stop"] == 222.74
+    assert any("NTAP filled at 234.95 vs 239.18 staged: stop 222.74 -> 218.51" in n for n in notes)
+    # A fill at the staged price, an adopted position, and a holding seen before are left alone.
+    st = {"positions": {"A": {"entry_date": "2026-10-12", "entry_price": 10.0, "qty": 5, "filled": False, "stop": 9.0},
+                        "B": {"entry_date": "2026-10-01", "entry_price": 10.0, "qty": 5, "filled": True, "stop": 9.0}}}
+    sync_positions(st, FakeBroker(), {"A": _held(10.0), "B": _held(9.5)}, date(2026, 10, 13))
+    assert st["positions"]["A"]["stop"] == 9.0 and st["positions"]["B"]["stop"] == 9.0
+    assert "anchored_to_fill" not in st["positions"]["B"]
+
+
+def test_the_evening_protection_uses_the_fill_based_stop_and_moves_a_leg_left_at_the_staged_level():
+    from desk.execution import sync_positions
+    pos = lambda: {"entry_date": "2026-10-12", "entry_price": 239.18, "qty": 1, "filled": False, "order_id": "e1",
+                   "stop": 222.74, "target": 288.50}
+    # Normal case: the bracket's DAY legs have expired, so the GTC protection is placed at the new level.
+    b, st, notes = FakeBroker(), {"positions": {"NTAP": pos()}}, []
+    sync_positions(st, b, {"NTAP": _held(234.95, 1.0)}, date(2026, 10, 13))
+    run_daily.ensure_stop(b, "NTAP", st["positions"]["NTAP"], notes)
+    assert b.protected == [("NTAP", 1, 218.51, 284.27)] and "reanchor_pending" not in st["positions"]["NTAP"]
+    # A leg still resting at the staged 222.74 is moved, not duplicated.
+    b, st, notes = FakeBroker(), {"positions": {"NTAP": pos()}}, []
+    b.existing_stops["NTAP"] = SimpleNamespace(stop_price=222.74, qty=1)
+    b.moved = []
+    b.move_exit_levels = lambda s, stop, tgt: b.moved.append((s, stop, tgt))
+    sync_positions(st, b, {"NTAP": _held(234.95, 1.0)}, date(2026, 10, 13))
+    run_daily.ensure_stop(b, "NTAP", st["positions"]["NTAP"], notes)
+    assert b.moved == [("NTAP", 218.51, 284.27)] and b.protected == []
+    assert any("resting stop moved 222.74 -> 218.51" in n for n in notes)
+    # If the broker refuses the move, state goes back to what actually rests.
+    b, st, notes = FakeBroker(), {"positions": {"NTAP": pos()}}, []
+    b.existing_stops["NTAP"] = SimpleNamespace(stop_price=222.74, qty=1)
+
+    def refuse(*a):
+        raise RuntimeError("order not replaceable")
+    b.move_exit_levels = refuse
+    sync_positions(st, b, {"NTAP": _held(234.95, 1.0)}, date(2026, 10, 13))
+    run_daily.ensure_stop(b, "NTAP", st["positions"]["NTAP"], notes)
+    p = st["positions"]["NTAP"]
+    assert p["stop"] == 222.74 and p["target"] == 288.50 and any("stop left at 222.74" in n for n in notes)
+
+
+def test_move_exit_levels_reprices_both_legs_in_either_direction():
+    from desk.execution import Broker
+
+    class _T(_FakeTrading):
+        def replace_order_by_id(self, oid, req):
+            self.replaced.append((oid, req.stop_price, req.limit_price))
+    t = _T([_Order(stop_price=222.74, oid="s1", symbol="NTAP"), _Order(limit_price=288.50, oid="t1", symbol="NTAP")])
+    Broker(t).move_exit_levels("NTAP", 218.51, 284.27)                     # down: raise_stop would refuse this
+    assert t.replaced == [("s1", 218.51, None), ("t1", None, 284.27)]

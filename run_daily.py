@@ -534,7 +534,21 @@ def ensure_stop(broker, sym: str, pos: dict, notes: list) -> None:
         notes.append(f"MANUAL ACTION: {sym} protection UNVERIFIED: the broker order query failed - check its stop "
                      f"at the broker")
         return
+    moved = pos.pop("reanchor_pending", False)
     if legs["stop"] is not None:
+        if moved and abs(float(legs["stop"].stop_price) - float(pos["stop"])) >= 0.01:
+            # A leg still resting at the staged level after the stop was measured from the fill (anchor_to_fill).
+            # Bracket legs normally expire at the close; this covers one that did not.
+            try:
+                broker.move_exit_levels(sym, float(pos["stop"]), pos.get("target"))
+                notes.append(f"{sym} resting stop moved {float(legs['stop'].stop_price):.2f} -> {pos['stop']:.2f} "
+                             f"(measured from the fill)")
+            except Exception as e:
+                log.error("moving %s exit legs failed: %s", sym, e)
+                # State must match what actually rests: back to the staged levels.
+                pos["stop"], pos["target"] = float(legs["stop"].stop_price), pos.get("staged_target", pos.get("target"))
+                notes.append(f"{sym} stop left at {pos['stop']:.2f}: moving it to the fill-based level was "
+                             f"rejected ({type(e).__name__})")
         check_coverage(sym, pos, legs, notes)
         return
     try:
