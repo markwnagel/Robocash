@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Point-in-time checks for the 2026-10-03 audit's proposals 2 (correlation_threshold) and 3 (REDUCE sizing).
-Reuses robustness.py's runner; writes state/robustness/2026-10-03-audit/. Nothing here touches trials.jsonl.
+Reuses robustness.py's runner; writes state/robustness/2026-10-03-audit/. Each variant is logged to trials.jsonl (robustness.log_variant_trials).
 
   python scripts/check_audit_proposals.py      ~20 min on 20 workers; summary: see config.yaml comments
 """
@@ -62,6 +62,7 @@ def main():
         for r in ex.map(R.run_job, jobs, chunksize=1):
             res[r["name"]] = r
     inputs.unlink(missing_ok=True)
+    R.log_variant_trials(root / "state" / "history" / "trials.jsonl", jobs, res, "audit-2026-10-03")
     rows = []
     for j in jobs:
         r = res[j["name"]]

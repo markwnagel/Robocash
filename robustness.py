@@ -19,8 +19,9 @@ that number cannot:
   windows        every 3-year window starting each quarter
   bootstrap      block-resampled 3-year paths: the odds of each drawdown switch firing
 
-Nothing here goes into state/history/trials.jsonl: these runs test the chosen config, they do not choose
-one. Adopting anything seen here means running it through backtest.py, which logs it as a trial.
+This study's own runs do not go into state/history/trials.jsonl (they test the chosen config); the variant counts
+are in backtest.prior_untracked_trials. The scripts/check_*.py studies, which test alternatives, log each variant
+with log_variant_trials(). excess_vs_spy() is the bar a proposal is judged on.
 Output: state/robustness/<date>/results.json, report.md, curves.pkl
 """
 from __future__ import annotations
@@ -161,6 +162,46 @@ def full_stats(eq: pd.Series) -> dict:
             "longest_underwater_days": int(max(spells)), "worst_month": float(monthly.min()) if len(monthly) else None,
             "best_month": float(monthly.max()) if len(monthly) else None,
             "pct_months_up": float((monthly > 0).mean()) if len(monthly) else None, "years": years}
+
+
+def excess_vs_spy(eq: pd.Series, spy: pd.Series, horizon: int = 126) -> dict:
+    """The strategy against buy-and-hold SPY over the same dates: CAGR difference, and over every `horizon`-day
+    window (126 = six months) the median and 10th-percentile excess return and how often it beat SPY. The bar
+    proposals are judged on (engineering review 2026-10-17): the desk's job is to beat SPY, and an absolute-
+    return bar passed changes that only added exposure (reduce_factor 1.0: +1.8%/yr, drawdown 3pt deeper)."""
+    eq = eq.dropna()
+    s = spy.reindex(eq.index).ffill().dropna()
+    eq = eq.reindex(s.index)
+    if len(eq) < horizon + 2:
+        return {"cagr_excess": None, "excess_6m_median": None, "excess_6m_p10": None, "beat_6m": None}
+    years = max((eq.index[-1] - eq.index[0]).days / 365.25, 1e-9)
+    cagr = lambda x: (x.iloc[-1] / x.iloc[0]) ** (1 / years) - 1  # noqa: E731
+    ex = (eq.pct_change(horizon) - s.pct_change(horizon)).dropna()
+    return {"cagr_excess": float(cagr(eq) - cagr(s)), "excess_6m_median": float(ex.median()),
+            "excess_6m_p10": float(ex.quantile(0.1)), "beat_6m": float((ex > 0).mean())}
+
+
+def log_variant_trials(path, jobs: list, results: dict, tag: str) -> int:
+    """Append one trial per variant per window (its first start) to the trial log, so every config tested by a
+    check script counts toward the Deflated Sharpe's N. They were never logged: by 2026-10-17, 63 variants had been
+    tried outside the log, against 20 in it (engineering review). Returns how many were written."""
+    seen, n = set(), 0
+    for j in jobs:
+        r = results.get(j["name"])
+        if r is None or j.get("mode") in ("random", "frictions"):
+            continue
+        ov = {".".join(p): v for p, v in j.get("overrides", [])}
+        key = (json.dumps(ov, sort_keys=True, default=str), j.get("universe", "pit"), j["group"])
+        if key in seen:
+            continue
+        seen.add(key)
+        st = full_stats(r["equity"])
+        T.record(Path(path), {"config_id": T.config_id({"overrides": ov, "universe": j.get("universe", "pit")}),
+                              "overrides": ov, "tag": tag, "start": j["start"], "end": j["end"],
+                              "universe_id": j.get("universe", "pit"), "stats": T.return_stats(r["equity"]),
+                              "total": st["total"], "maxdd": st["maxdd"], "sharpe_annual": st["sharpe"]})
+        n += 1
+    return n
 
 
 def period_return(eq: pd.Series, start: str, end: str) -> float | None:

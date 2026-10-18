@@ -27,7 +27,7 @@ from desk import schedule
 from desk.monitor import (coverage_alarms, MONITOR_SCHEMA, baseline_view, brief_signatures, build_system_prompt, compare_roles,
                           expected_runs, fallback_report, hard_alarms, job_signals, log_signatures, match_runs,
                           render_config, role_signals, schedule_slots, summary_for_email,
-                          commits_since, feed_signals)
+                          commits_since, feed_signals, model_review_due, month_spend, spend_alarms)
 from desk.notify import send_email
 from desk.report import diff_fingerprint, fingerprint, load_json
 from desk.state import STATE_DIR, atomic_write_text
@@ -127,6 +127,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--print", dest="print_only", action="store_true", help="print the report; save and send nothing")
     ap.add_argument("--no-llm", action="store_true", help="deterministic signals and fallback report only")
+    ap.add_argument("--llm", action="store_true", help="run the model review today even if it is not due")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = load_config()
@@ -188,6 +189,10 @@ def main() -> None:
     jobs = job_signals(window, now)
     alarms = hard_alarms(runs, jobs, tdays, window)
     alarms += coverage_alarms(runs, tdays)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    spent = month_spend(telemetry.load_events(month_start.astimezone(timezone.utc), now.astimezone(timezone.utc)))
+    budget = float((cfg.get("budget") or {}).get("monthly_api_usd") or 0)
+    alarms += spend_alarms(spent, budget, now.date())
     loaded, wake = schedule.loaded_jobs(), schedule.repeating_wake()
     for job, ok in (loaded or {}).items():
         if not ok:          # a job that is not loaded never runs and never logs: say so while this one can
@@ -251,11 +256,15 @@ def main() -> None:
         "changes": changes,
         "commits": commits_since(root, start), "code_version": telemetry.code_version(),
         "hard_alarms": alarms,
+        "api_spend_month_to_date": {"usd": spent, "budget_usd": budget or None},
         "open_findings": open_f, "previous_recommendations": recs,
     }
 
     result, reason, analysis = None, "skipped (--no-llm)", "deterministic"
-    if not args.no_llm:
+    due, why = model_review_due(mcfg, now, alarms, mstate.get("last_model_review"), forced=args.llm)
+    if not args.no_llm and not due:
+        reason = why
+    if not args.no_llm and due:
         template = (root / mcfg.get("prompt_file", "agent-monitor-prompt.md")).read_text()
         report_to = cfg.get("report", {}).get("to", "")
         system = build_system_prompt(template, render_config(mcfg, report_to, str(root)))
@@ -263,11 +272,16 @@ def main() -> None:
         analysis = "claude" if result else "deterministic"
     if result is None:
         sev1 = [a for a in alarms if a.get("severity", "SEV1") == "SEV1"]
-        result = {"status": "incident" if sev1 else "degraded", "summary": f"Analysis unavailable: {reason}.",
-                  "report_markdown": fallback_report(payload, reason),
-                  "findings": [{"id": f"A-{a['key']}", "signature": a["key"], "title": a["title"],
-                                "severity": a.get("severity", "SEV1"), "trend": "new", "agents": ["desk-job"]}
-                               for a in alarms],
+        scheduled = not args.no_llm and not due
+        alarm_findings = [{"id": f"A-{a['key']}", "signature": a["key"], "title": a["title"],
+                           "severity": a.get("severity", "SEV1"), "trend": "new", "agents": ["desk-job"]} for a in alarms]
+        # A rules-only day keeps the last review's open findings; replacing them with today's alarms would mark
+        # every one resolved without anyone looking.
+        carried = [f for f in mstate.get("open_findings", []) if scheduled and not str(f.get("id", "")).startswith("A-")]
+        result = {"status": "incident" if sev1 else ("degraded" if alarms or not scheduled else "healthy"),
+                  "summary": (f"Rules-only check ({reason})." if scheduled else f"Analysis unavailable: {reason}."),
+                  "report_markdown": fallback_report(payload, reason, scheduled=scheduled),
+                  "findings": carried + alarm_findings,
                   "recommendations": recs, "resolved_finding_ids": [], "escalate": bool(sev1),
                   "escalation_summary": "; ".join(a["title"] for a in sev1)}
 
@@ -317,6 +331,7 @@ def main() -> None:
                                    _num([r["id"] for r in result.get("recommendations", [])], "R")),
         "incident_days": sorted(incident_days)[-60:], "escalated": sorted(escalated)[-200:],
         "pending_escalations": [list(t) for t in todo if t[0] not in escalated],
+        "last_model_review": now.isoformat() if analysis == "claude" else mstate.get("last_model_review"),
     }
     atomic_write_text(MON_DIR / "state.json", json.dumps(new_state, indent=1, default=str))
     shown = str(rpath.relative_to(root)) if rpath.is_relative_to(root) else str(rpath)

@@ -2,7 +2,7 @@
 """Point-in-time check of two stop changes after the live desk's stop-outs kept rebounding (2026-10-13):
   - stop 2.5x ATR with the target held at 6x ATR (2.4R), the variant the 2026-09-24 study left untested
   - a stop judged on the close and sold at the next open, alone and with a 3x ATR resting stop under it
-Reuses robustness.py's runner; writes state/robustness/2026-10-13-stops/. Nothing here touches trials.jsonl.
+Reuses robustness.py's runner; writes state/robustness/2026-10-13-stops/. Each variant is logged to trials.jsonl (robustness.log_variant_trials).
 
   python scripts/check_stop_variants.py      ~60 runs; summary: see config.yaml comments
 """
@@ -65,6 +65,7 @@ def main():
         for r in ex.map(R.run_job, jobs, chunksize=1):
             res[r["name"]] = r
     inputs.unlink(missing_ok=True)
+    R.log_variant_trials(root / "state" / "history" / "trials.jsonl", jobs, res, "stops-2026-10-13")
     rows = []
     for j in jobs:
         r = res[j["name"]]
@@ -72,7 +73,7 @@ def main():
         stops = t[t["reason"].isin(STOP_REASONS)] if len(t) else t
         rows.append({"variant": j["variant"], "window": j["group"], "offset": j["offset"], "start": j["start"],
                      "n_trades": r["n_trades"], "total": st["total"], "cagr": st["cagr"], "maxdd": st["maxdd"],
-                     "sharpe": st["sharpe"], "win_rate": float((t["pnl"] > 0).mean()) if len(t) else None,
+                     "sharpe": st["sharpe"], **R.excess_vs_spy(r["equity"], spy), "win_rate": float((t["pnl"] > 0).mean()) if len(t) else None,
                      "stop_share": len(stops) / len(t) if len(t) else None,
                      "avg_stop_loss_pct": float(stops["pnl_pct"].mean()) if len(stops) else None,
                      "median_hold": float(t["hold_days"].median()) if len(t) else None})

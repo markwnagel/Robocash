@@ -254,6 +254,45 @@ def coverage_alarms(runs: dict, trading_days: set | None) -> list:
     return alarms
 
 
+# An error that no retry fixes: the account cannot call the API. On 2026-10-17 the spend limit was reached and
+# every role failed with "You have reached your specified API usage limits" - the desk would have bought nothing
+# for two weeks (the analyst fails closed), and this monitor's own model call failed too. Nothing alarmed.
+API_ACCESS = re.compile(r"usage limit|credit balance|billing|authentication|invalid x-api-key|permission_error|"
+                        r"Error code: 40[13]", re.I)
+
+
+def api_access_alarms(events: list) -> list:
+    """One SEV1 per day on which any role was refused by the API for access, billing or limit reasons."""
+    by_day: dict = {}
+    for e in events or []:
+        if e.get("event") == "llm_call" and e.get("outcome") == "error" and API_ACCESS.search(str(e.get("error") or "")):
+            by_day.setdefault(str(e["ts"])[:10], []).append(e)
+    return [{"key": f"api-access-{d}", "severity": "SEV1", "title": "Anthropic API refused requests (access or spend limit)",
+             "detail": f"{len(es)} call(s) on {d} ({', '.join(sorted({str(x.get('role')) for x in es}))}): "
+                       f"{str(es[0].get('error'))[:240]}. While this lasts the analyst is unavailable, so the desk buys "
+                       f"nothing (exits and stops still run), and the monitor's analysis falls back to rules. Fix it in "
+                       f"the Anthropic Console (Settings > Limits or Billing)."}
+            for d, es in sorted(by_day.items())]
+
+
+def month_spend(events: list) -> float:
+    """API cost recorded this calendar month, model plus server tools, from llm_call events."""
+    return round(sum((e.get("cost_usd") or 0) + (e.get("web_search_usd") or 0)
+                     for e in events or [] if e.get("event") == "llm_call"), 2)
+
+
+def spend_alarms(spent: float, budget: float | None, today: date) -> list:
+    """SEV2 at 80% of the monthly budget (config budget.monthly_api_usd), SEV1 at 100%: the Console limit, if set
+    near the budget, stops every role when reached."""
+    if not budget or budget <= 0 or spent < 0.8 * budget:
+        return []
+    sev = "SEV1" if spent >= budget else "SEV2"
+    return [{"key": f"spend-{sev}-{today:%Y-%m}", "severity": sev,
+             "title": f"API spend ${spent:.2f} is {spent / budget:.0%} of the ${budget:.0f} monthly budget",
+             "detail": "Raise budget.monthly_api_usd (and the Console limit) or cut calls; at the Console limit every "
+                       "role fails and the desk stops buying until the month resets."}]
+
+
 def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list | None = None) -> list:
     """Conditions that escalate whether or not the model is reachable. The desk is the job that maintains
     exits and protective stops, so a missed, crashed or hung desk run is SEV1 on its own; so is a holding
@@ -309,6 +348,7 @@ def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list |
                            "title": "Daily email failed to send",
                            "detail": f"run {e.get('run_id')} at {e['ts']}: {e.get('email_detail')}. The report is in "
                                      f"state/reports/; the next email will carry the changes this one missed."})
+    alarms += api_access_alarms(events)
     return alarms
 
 
@@ -380,15 +420,49 @@ MONITOR_SCHEMA = {
 }
 
 
-def fallback_report(payload: dict, reason: str) -> str:
-    """Used when the model call fails: the numbers and hard alarms still get written down."""
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def model_review_due(mcfg: dict, now: datetime, alarms: list, last_review: str | None, forced: bool = False) -> tuple:
+    """(due, why). The model review was 37% of API spend ($0.63 a day) and 91% of its findings were SEV3/4; the
+    hard alarms that matter are code and run every day regardless (engineering review 2026-10-17). With
+    monitor.model_review_weekdays set it runs on those days, on any day a hard alarm fires, and at least weekly."""
+    days = mcfg.get("model_review_weekdays")
+    if forced:
+        return True, "forced (--llm)"
+    if days is None:
+        return True, "daily"
+    if alarms:
+        return True, "a hard alarm was raised"
+    if now.weekday() in days:
+        return True, "weekly review day"
+    if not last_review or (now - datetime.fromisoformat(last_review)).days >= 7:
+        return True, "no model review in the last 7 days"
+    return False, (f"rules-only day: the model review runs {', '.join(WEEKDAYS[d] for d in days)} "
+                   f"or when a hard alarm fires")
+
+
+def fallback_report(payload: dict, reason: str, scheduled: bool = False) -> str:
+    """Written when there is no model review: on a rules-only day (scheduled) or when the model call failed. The
+    numbers and hard alarms still get written down."""
     w = payload["run"]
     alarms = payload.get("hard_alarms", [])
-    status = "🔴 Incident" if alarms else "⚪ Unknown (analysis unavailable)"
+    sev1 = any(a.get("severity", "SEV1") == "SEV1" for a in alarms)
+    if scheduled:
+        status = "🔴 Incident" if sev1 else ("🟡 Alarm" if alarms else "🟢 No hard alarms")
+        intro = (f"No model review today ({reason}). The hard alarms below are code and run every day; open findings "
+                 f"from the last model review are carried forward unchanged.")
+    else:
+        status = "🔴 Incident" if alarms else "⚪ Unknown (analysis unavailable)"
+        intro = (f"The monitor's analysis step failed ({reason}); this is the deterministic fallback. It lists the "
+                 f"measured signals and hard alarms without diagnosis.")
+    spend = payload.get("api_spend_month_to_date") or {}
     lines = [f"# Agent Reliability Report: {w['window_start']} to {w['window_end']}", "", "## Summary",
-             f"Overall status: {status}",
-             f"The monitor's analysis step failed ({reason}); this is the deterministic fallback. It lists the "
-             f"measured signals and hard alarms without diagnosis.", "", "## Hard alarms"]
+             f"Overall status: {status}", intro]
+    if spend.get("usd") is not None:
+        lines.append(f"API spend this month: ${spend['usd']:.2f}"
+                     + (f" of a ${spend['budget_usd']:.0f} budget" if spend.get("budget_usd") else ""))
+    lines += ["", "## Hard alarms"]
     lines += [f"- **{a['severity']}** {a['title']}: {a['detail']}" for a in alarms] or ["- none"]
     lines += ["", "## Jobs"]
     for job, r in payload["runs"].items():
