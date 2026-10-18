@@ -162,7 +162,7 @@ analyst:
   model: claude-opus-5
   max_web_searches: 5
   candidates_to_review: 15     # >= max_positions: entries the analyst has not reviewed are dropped
-  reduce_factor: 0.75          # shares kept on an entry the analyst marks REDUCE (floored, min 1 share;
+  reduce_factor: 1.0           # shares kept on an entry the analyst marks REDUCE (floored, min 1 share;
                                # capped at 1.0 in code so it can never enlarge). Was 0.5 until 2026-09-24:
                                # REDUCE hit 10 of the first 19 entries, leaving live at ~52% invested and
                                # 7.8% open risk against a backtest that assumes full size. Not backtestable
@@ -176,7 +176,9 @@ analyst:
                                # Same paired-seed design, 0.75 vs 1.0: no cut wins return in 13-17 of 20 seeds in
                                # both windows (2018-26 median 5.2% vs 3.4%/yr) but median drawdown is 1.2-4.5pt
                                # deeper - more exposure, not an edge. Fails the audit's own bar (< ~1pt). Owner's
-                               # call; unchanged pending that decision.
+                               # call: 1.0 from 2026-10-17 - the sizing arm is retired as pre-registered above.
+                               # REDUCE is still recorded (thesis, brief) and REMOVE still vetoes; the implied-vol
+                               # half-size is unchanged.
   red_team_enabled: true
   red_team_max_web_searches: 5    # was 10; analyst was 20. Each search adds 20-35k input tokens (2026-09-29,
                                   # monitor F-19); 1-2 a run is normal, 5 caps the worst case

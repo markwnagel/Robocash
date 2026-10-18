@@ -114,6 +114,10 @@ def analyst_rules(cfg: dict) -> dict:
                            "follow the company's fiscal year, not the calendar, and transcripts are often re-posted "
                            "weeks later: an earnings-call headline about the report on or before last_results_8k does "
                            "not make earnings_date stale"),
+        "reduce_sizing": (f"REDUCE on a candidate keeps {min(1.0, float(cfg['analyst']['reduce_factor'])):.0%} of its "
+                          "shares" + (": it records the concern and does not change the size - do not describe a "
+                                      "REDUCEd candidate as a smaller slot" if float(cfg["analyst"]["reduce_factor"]) >= 1
+                                      else "")),
         "news_counts": ("news_7d and news_24h count headlines about the company; headlines_dropped_unrelated were "
                         "returned by the feed but are about other companies and are not in news_7d; headlines lists "
                         "the newest few and headlines_not_shown counts the rest"),
