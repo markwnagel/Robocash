@@ -103,3 +103,16 @@ def test_a_saved_audit_can_be_emailed_without_running_it_again(tmp_path, monkeyp
     assert A.email_saved(_cfg(), "2026-09-26", False) == "emailed x"
     assert sent[-1][0] == "TeamRobo weekly audit 2026-09-26" and sent[-1][2] is None      # text only
     assert A.email_saved(_cfg(), "2026-01-01", False).startswith("no saved audit")
+
+
+def test_an_empty_audit_reply_is_not_accepted():
+    """2026-10-17 rerun: schema-valid, but summary "placeholder" and no findings - and it was emailed."""
+    from audit import usable_audit
+    real = {"summary": "The book lost money in a momentum unwind; stops did their job.", "findings": [{"title": "t"}],
+            "proposed_changes": [], "sample_size_warning": "small"}
+    assert usable_audit(real)
+    assert not usable_audit(None) and not usable_audit({})
+    assert not usable_audit(dict(real, summary="placeholder"))
+    assert not usable_audit(dict(real, summary="Placeholder summary to be written after the findings are final."))
+    assert not usable_audit(dict(real, findings=[]))
+    assert not usable_audit(dict(real, summary="ok"))

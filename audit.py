@@ -6,7 +6,7 @@
   python audit.py --email-saved     # email the latest saved audit again without re-running it (--date, --resend)
 
 The launchd job com.alpaca-desk.weekly-audit runs it Saturdays 09:00. One email per audit: a marker
-(state/audits/<date>.sent) stops a re-run from sending a second; --resend overrides.
+(state/audits/<date>.sent) stops a re-run from sending a second; --resend overrides, for a re-run or --email-saved.
 """
 from __future__ import annotations
 
@@ -65,6 +65,16 @@ AUDIT_SCHEMA = {
 
 
 AUDIT_MAX_TOKENS = 64000
+
+
+def usable_audit(out: dict | None) -> bool:
+    """A schema-valid reply can still be empty: the 2026-10-17 rerun returned a full sample-size paragraph that
+    promised proposals, then summary "placeholder" and no findings or proposed changes - and it was emailed as
+    the week's audit. A real audit always has a summary and at least one finding."""
+    if not out:
+        return False
+    summary = str(out.get("summary") or "").strip()
+    return len(summary) >= 40 and "placeholder" not in summary.lower() and bool(out.get("findings"))
 
 
 def trade_stats(trades: pd.DataFrame, closes: pd.DataFrame | None, post_days) -> dict:
@@ -271,8 +281,15 @@ def main() -> None:
     }
     # Output tokens 11,960 / 11,134 / 15,022 on 09-26..10-10 against a 16k cap, then cut off at 16,000 on 10-17
     # once the 90-day window doubled the trades it reads: the reply did not parse and the week had no audit.
-    out = _call_json(AUDIT_SYSTEM, json.dumps(payload, indent=1, default=str), AUDIT_SCHEMA, acfg["model"], 0,
-                     role="auditor", max_tokens=AUDIT_MAX_TOKENS)
+    for attempt in range(2):
+        out = _call_json(AUDIT_SYSTEM, json.dumps(payload, indent=1, default=str), AUDIT_SCHEMA, acfg["model"], 0,
+                         role="auditor", max_tokens=AUDIT_MAX_TOKENS)
+        if out is None or usable_audit(out):
+            break
+        log.error("auditor reply is empty (summary %r, %d findings) - %s", str(out.get("summary"))[:40],
+                  len(out.get("findings") or []), "asking again" if attempt == 0 else "giving up")
+        telemetry.agent_output("auditor", None, None, empty_reply=1)
+        out = None
     if not out:
         msg = f"AUDIT {today}: auditor unavailable. Stats: {json.dumps(stats)}"
         send(msg, cfg)
@@ -299,7 +316,7 @@ def main() -> None:
     atomic_write_text(out_dir / f"{today.isoformat()}.json",
                       json.dumps({"audit": out, "stats": stats, "trials": trials_section(cfg)}, indent=1, default=str))
     send(text, cfg)
-    status = email_audit(today, out, stats, text, cfg)
+    status = email_audit(today, out, stats, text, cfg, resend=args.resend)
     telemetry.note(auditor="ok", trades=stats.get("n_trades", 0), proposed_changes=len(out["proposed_changes"]),
                    email=status)
 
