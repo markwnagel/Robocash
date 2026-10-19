@@ -440,3 +440,22 @@ def test_the_ai_roles_are_told_how_to_read_an_earnings_headline_against_the_date
     from desk.analyst import analyst_rules
     r = analyst_rules(cfg)["earnings_dates"]
     assert "last_results_8k" in r and "fiscal year" in r and "re-posted" in r
+
+
+def test_an_asset_on_an_exchange_the_sdk_does_not_know_cannot_crash_the_universe(cfg):
+    """2026-10-19: CECO moved to TXSE and the SDK's Asset enum rejected the whole asset list - the desk run crashed
+    in the decision phase. The raw list is read now; an unknown exchange is just outside the configured ones."""
+    from desk.data import list_candidate_assets
+
+    class _T:
+        def get(self, path, params):
+            assert path == "/assets" and params == {"status": "active", "asset_class": "us_equity"}
+            return [{"symbol": "AAPL", "exchange": "NASDAQ", "tradable": True, "name": "Apple Inc."},
+                    {"symbol": "CECO", "exchange": "TXSE", "tradable": True, "name": "CECO Environmental"},
+                    {"symbol": "XYZ", "exchange": "NYSE", "tradable": False, "name": "Halted"},
+                    {"symbol": "BRK.B", "exchange": "NYSE", "tradable": True, "name": "Berkshire"},
+                    {"symbol": "SPXL", "exchange": "ARCA", "tradable": True, "name": "Direxion Daily 3X ETF"}]
+    ucfg = dict(cfg["universe"])
+    out = list_candidate_assets(_T(), ucfg)
+    assert "AAPL" in out and "CECO" not in out and "XYZ" not in out and "BRK.B" not in out
+    assert list_candidate_assets(_T(), dict(ucfg, exchanges=list(ucfg["exchanges"]) + ["TXSE"])).count("CECO") == 1

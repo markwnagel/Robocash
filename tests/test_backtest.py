@@ -335,8 +335,10 @@ def test_a_recent_dilutive_filing_keeps_a_candidate_out_for_ninety_days(cfg, pan
     off = pd.DataFrame({"date": [filing.date().isoformat()], "symbol": [sym]})
     _, blocked = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, offerings=off)
     entries = pd.to_datetime(blocked[blocked.symbol == sym]["entry_date"])
-    # No entry staged inside the 90 days after the filing (entries fill the session after the signal).
-    assert not ((entries > filing + pd.Timedelta(days=1)) & (entries <= filing + pd.Timedelta(days=91))).any()
+    # No entry filled within the 90 days after the filing: a signal on day 90 is the last one blocked, and its fill
+    # lands on the next session - day 91 or later. (A bound of 91 failed on 2026-10-19, when the synthetic
+    # calendar put a fill exactly on day 91.)
+    assert not ((entries > filing + pd.Timedelta(days=1)) & (entries <= filing + pd.Timedelta(days=90))).any()
     _, none = run_backtest(panel, cfg, dates[0], dates[-1], 10000.0, 10, 5, offerings=pd.DataFrame(columns=["date", "symbol"]))
     pd.testing.assert_frame_equal(none, base)                             # an empty history changes nothing
 

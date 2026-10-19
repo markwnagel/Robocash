@@ -15,8 +15,6 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import AssetClass, AssetStatus
-from alpaca.trading.requests import GetAssetsRequest
 
 from .state import atomic_pickle, atomic_write_text
 
@@ -39,21 +37,24 @@ def last_close_cutoff(now: datetime | None = None) -> datetime:
 
 
 def list_candidate_assets(trading: TradingClient, ucfg: dict) -> list:
-    assets = trading.get_all_assets(
-        GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
-    )
+    # The raw list, not get_all_assets(): the SDK validates every asset against a fixed exchange enum, so one
+    # listing on an exchange it does not know rejects the whole list. On 2026-10-19 CECO moved to TXSE (the Texas
+    # Stock Exchange; alpaca-py 0.43.5, the latest, does not know it) and the desk run crashed in the decision
+    # phase - no exits, no entries that day. An unknown exchange is now just one more name outside ucfg exchanges.
+    assets = trading.get("/assets", {"status": "active", "asset_class": "us_equity"})
     exchanges = set(ucfg["exchanges"])
     bad = [k.lower() for k in ucfg["exclude_name_keywords"]]
     out = set()
     for a in assets:
-        if a.exchange.value not in exchanges or not a.tradable:
+        sym = str(a.get("symbol") or "")
+        if a.get("exchange") not in exchanges or not a.get("tradable"):
             continue
-        if not a.symbol.isalpha() or len(a.symbol) > 5:
+        if not sym.isalpha() or len(sym) > 5:
             continue
-        name = (a.name or "").lower()
+        name = (a.get("name") or "").lower()
         if any(k in name for k in bad):
             continue
-        out.add(a.symbol)
+        out.add(sym)
     return sorted(out)
 
 
