@@ -357,6 +357,9 @@ def mon(tmp_path, monkeypatch):
                         lambda: {"desk": [(d, 16, 45) for d in range(5)], "report": [(d, 14, 0) for d in range(5)],
                                  "audit": [(5, 9, 0)]})
     monkeypatch.setattr(job, "trading_days", lambda cfg, s, e: None)
+    # Parity replays the backtest over the real briefs, shadow book and Alpaca prices; unstubbed, every monitor
+    # test depended on the live account and the network, and failed on 2026-10-20 once the real gap passed 5 pts.
+    monkeypatch.setattr(job.parity, "run", lambda cfg, *a, **k: {})
     sent = []
     monkeypatch.setattr(job, "send_email", lambda subject, body, cfg, html=None: sent.append((subject, body)) or "emailed x")
     return job, sent, tmp_path

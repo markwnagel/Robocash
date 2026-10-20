@@ -480,6 +480,7 @@ def test_monitor_job_alarms_on_todays_missed_desk_run(tmp_path, monkeypatch):
     monkeypatch.setattr(job, "installed_schedules",
                         lambda: {"desk": [(d, slot.hour, slot.minute) for d in range(7)], "report": None, "audit": None})
     monkeypatch.setattr(job, "trading_days", lambda cfg, s, e: None)
+    monkeypatch.setattr(job.parity, "run", lambda cfg, *a, **k: {})      # no live data or network in tests
     sent = []
     monkeypatch.setattr(job, "send_email", lambda s, b, c, html=None: sent.append(s) or "emailed x")
     (tmp_path / "monitor").mkdir()
