@@ -461,8 +461,13 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                            for e in entries[: cfg["analyst"]["candidates_to_review"]]],
             "blocked_by_hard_filters": blocked,
         }
-        if cfg["analyst"].get("red_team_enabled"):
-            cases = red_team(red_team_view(payload, cfg), cfg)
+        rt_view = red_team_view(payload, cfg)
+        if cfg["analyst"].get("red_team_enabled") and not (rt_view.get("holdings") or rt_view.get("candidates")):
+            # Candidates-only scope on a day with none: nothing to review. It used to be called with zero symbols,
+            # log the empty reply as ok, and the brief said "unavailable" (monitor F-43, 2026-10-20).
+            notes.append("red team: nothing to review today (it reviews candidates only, and there are none)")
+        elif cfg["analyst"].get("red_team_enabled"):
+            cases = red_team(rt_view, cfg)
             if cases:
                 payload["red_team"] = cases
                 flagged = [f"{s} {c['trap_type']} {c['severity']:.1f}" for s, c in cases.items() if c["severity"] >= 0.5]

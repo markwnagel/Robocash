@@ -841,3 +841,19 @@ def test_with_the_offering_block_off_a_filing_is_flagged_not_blocked(wired, cfg,
     assert f"blocked {top}" not in sent[-1]
     st = json.loads(state_mod.STATE_FILE.read_text())
     assert "dilutive filing flagged" in st["positions"][top]["thesis"]
+
+
+def test_a_day_with_no_candidates_skips_the_red_team_and_says_why(wired, cfg, monkeypatch):
+    """F-43: the brief said 'red team unavailable' on a day it had nothing to review."""
+    holder, sent = wired
+    called = []
+    monkeypatch.setattr(run_daily, "red_team", lambda payload, cfg_: called.append(payload) or {})
+    monkeypatch.setattr(run_daily, "review", lambda payload, cfg_: {"verdicts": [], "brief": "", "data_concerns": []})
+    rt_cfg = dict(cfg, analyst=dict(cfg["analyst"], red_team_enabled=True, red_team_scope="candidates"))
+    monkeypatch.setattr(run_daily, "load_config", lambda *a, **k: rt_cfg)
+    monkeypatch.setattr(run_daily, "select_entries", lambda *a, **k: [])            # no candidates today
+    holder["broker"] = FakeBroker(positions={"S00": {"qty": 5.0, "avg_entry_price": 100.0, "current_price": 101.0,
+                                                     "market_value": 505.0, "unrealized_plpc": 0.01}})
+    run([])
+    assert called == []
+    assert "red team: nothing to review today" in sent[-1] and "red team unavailable" not in sent[-1]

@@ -338,3 +338,14 @@ def test_a_brief_calling_a_bought_candidate_no_trade_is_caught(monkeypatch):
                          {"analyst": {"model": "m", "max_web_searches": 0}})
     assert "AVTR" in out["no_trade_mismatch"] and events[-1]["brief_no_trade_mismatch"] is True
     assert '"concern on X (entry stands)" for a candidate' in analyst.ANALYST_SYSTEM
+
+
+def test_the_red_team_is_never_called_with_nothing_to_review(monkeypatch):
+    """Monitor F-43, 2026-10-20: zero candidates under the candidates-only scope sent an empty call, logged ok."""
+    from desk import analyst
+    calls, events = [], []
+    monkeypatch.setattr(analyst, "_call_json", lambda *a, **k: calls.append(1) or {"cases": []})
+    monkeypatch.setattr(analyst.telemetry, "agent_output", lambda role, req, ret, **k: events.append((role, req, ret, k)))
+    assert analyst.red_team({"holdings": [], "candidates": [], "held_symbols": ["AMD"]},
+                            {"analyst": {"model": "m", "red_team_max_web_searches": 2}}) == {}
+    assert calls == [] and events == [("red_team", 0, 0, {"skipped": "no symbols to review"})]
