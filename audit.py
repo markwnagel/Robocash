@@ -315,7 +315,8 @@ def main() -> None:
         status = send_email(f"TeamRobo weekly audit {today.isoformat()} | auditor unavailable",
                             msg + "\n\nThe statistics above are computed without the model; rerun with: python audit.py",
                             cfg) if acfg.get("email", True) else "email off (audit.email)"
-        telemetry.note(auditor="unavailable", trades=stats.get("n_trades", 0), email=status)
+        # Not "ok": the week had no audit (monitor R-49; 2026-10-17 ended ok with nothing parsed).
+        telemetry.note(status="degraded", auditor="unavailable", trades=stats.get("n_trades", 0), email=status)
         return
     lines = [f"WEEKLY AUDIT {today.isoformat()}", out["summary"], f"Sample size: {out['sample_size_warning']}", ""]
     for f in out["findings"]:
