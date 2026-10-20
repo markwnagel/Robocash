@@ -128,9 +128,11 @@ def role_signals(events: list) -> dict:
             "outputs": len(o), "no_answer": sum(1 for x in o if x.get("returned") is None),
             "coverage": round(ret / req, 3) if req else None,
             # Every counter a role reports about its own output. web_only_capped was emitted from 2026-10-09 but not
-            # listed here, so the monitor could not see the fix it was verifying (R-38).
+            # listed here, so the monitor could not see the fix it was verifying (R-38); brief_regime_mismatch (F-37)
+            # was missing the same way until 2026-10-20.
             "contract": {k: sum(x.get(k) or 0 for x in o)
-                         for k in ("brief_over_limit", "severity_out_of_range", "fell_back", "trimmed_for_length",
+                         for k in ("brief_over_limit", "brief_regime_mismatch", "brief_no_trade_mismatch",
+                                   "severity_out_of_range", "fell_back", "trimmed_for_length",
                                    "high_severity", "crowded_unsupported", "web_only_capped", "web_undated_capped", "web_citations",
                                    "web_citations_dated", "flagged", "empty_reply")
                          if any(k in x for x in o)},
