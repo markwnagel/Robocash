@@ -172,8 +172,19 @@ def build_universe(trading, data, cfg, force=False, cache_name="universe.json") 
         if age < ucfg["refresh_days"]:
             return u["symbols"]
     log.info("refreshing universe")
-    syms = list_candidate_assets(trading, ucfg)
-    panel = fetch_daily_bars(data, syms, 30, cfg["data"]["feed"], expect_gaps=True)
+    try:
+        syms = list_candidate_assets(trading, ucfg)
+        panel = fetch_daily_bars(data, syms, 30, cfg["data"]["feed"], expect_gaps=True)
+    except Exception as e:
+        # A failed refresh must not stop the run: on 2026-10-19 the asset list failed to parse and the decision
+        # phase died - no exits, no entries, no kill-switch check (monitor R-47). The last list is days old at
+        # most and still the right names to rank; the WARNING reaches the monitor's log signatures.
+        if not cache.exists():
+            raise
+        u = json.loads(cache.read_text())
+        log.warning("universe refresh failed (%s: %s) - using the saved list from %s", type(e).__name__,
+                    str(e)[:200], u["date"])
+        return u["symbols"]
     close, vol = panel["close"], panel["volume"]
     dollar_vol = (close * vol).tail(20).mean()
     last = close.ffill().iloc[-1]

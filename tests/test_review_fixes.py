@@ -97,3 +97,43 @@ def test_the_config_carries_the_review_settings(cfg):
     assert c["monitor"]["model_review_weekdays"] == [4] and c["analyst"]["red_team_scope"] == "candidates"
     assert c["analyst"]["red_team_max_web_searches"] <= 2 and c["budget"]["monthly_api_usd"] > 0
     assert c["backtest"]["prior_untracked_trials"] >= 63
+
+
+def test_a_failed_universe_refresh_falls_back_to_the_saved_list(tmp_path, cfg, caplog):
+    """Monitor R-47 (2026-10-19): the asset list failed to parse and the decision phase died - no exits, no entries.
+    A failed refresh now reuses the last saved list; with none saved, it still fails loudly."""
+    import json
+    import logging
+    import pytest
+    from desk.data import build_universe
+
+    class _Broken:
+        def get(self, *a, **k):
+            raise ValueError("Input should be 'AMEX', ... [input_value='TXSE']")
+
+    c = dict(cfg, _root=str(tmp_path))
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "universe.json").write_text(json.dumps({"date": "2026-10-01", "symbols": ["AMD", "TEAM"]}))
+    with caplog.at_level(logging.WARNING):
+        assert build_universe(_Broken(), None, c) == ["AMD", "TEAM"]
+    assert "universe refresh failed" in caplog.text and "2026-10-01" in caplog.text
+    (tmp_path / "state" / "universe.json").unlink()
+    with pytest.raises(ValueError):
+        build_universe(_Broken(), None, c)
+
+
+def test_a_degraded_audit_is_an_alarm():
+    """Monitor R-49: the 2026-10-17 audit parsed nothing and ended ok. It now ends degraded, which alarms."""
+    ev = [{"event": "run_end", "job": "audit", "status": "degraded", "run_id": "a1", "ts": "2026-10-24T16:03:00+00:00"},
+          {"event": "run_end", "job": "audit", "status": "ok", "run_id": "a2", "ts": "2026-10-24T16:30:00+00:00"}]
+    a = [x for x in M.hard_alarms({}, {}, None, ev) if x["key"].startswith("audit-")]
+    assert len(a) == 1 and a[0]["severity"] == "SEV2" and "a1" in a[0]["key"]
+    import audit
+    src = __import__("inspect").getsource(audit.main)
+    assert 'telemetry.note(status="degraded", auditor="unavailable"' in src
+
+
+def test_the_classifier_is_told_who_counts_as_an_insider():
+    """Monitor R-54 / F-46: a US Representative's DDOG purchase was noted as insider buying."""
+    from desk.facts import CLASSIFIER_SYSTEM
+    assert "Form 4 filers" in CLASSIFIER_SYSTEM and "politician" in CLASSIFIER_SYSTEM

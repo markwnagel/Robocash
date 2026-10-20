@@ -345,6 +345,11 @@ def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list |
                                "detail": f"{e.get('reason')}. Nothing trades until --resume"
                                          f"{' --reset-hwm' if e.get('hard') else ''}; "
                                          f"{e.get('open_positions', 0)} position(s) still open at that run."})
+        elif e.get("job") == "audit" and e.get("status") == "degraded":
+            alarms.append({"key": f"audit-degraded-{e.get('run_id')}", "severity": "SEV2",
+                           "title": "Weekly audit produced no usable audit",
+                           "detail": f"run {e.get('run_id')} at {e['ts']}: the auditor was unavailable or its reply empty or "
+                                     f"cut off; the week's email carried statistics only. Re-run: python audit.py --resend"})
         elif e.get("job") == "report" and e.get("email") == "failed":
             alarms.append({"key": f"report-email-{e.get('run_id')}", "severity": "SEV1",
                            "title": "Daily email failed to send",
