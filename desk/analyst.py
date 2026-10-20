@@ -267,6 +267,11 @@ def _call_json(system: str, user_text: str, schema: dict, model: str, max_search
 def red_team(payload: dict, cfg: dict) -> dict:
     """Bear case per symbol. Failure returns {} - the analyst then runs without it."""
     acfg = cfg["analyst"]
+    if not _symbols(payload):
+        # Never a call with nothing to review: on 2026-10-20 one went out with zero symbols, came back empty in 2.7s
+        # and was logged ok with coverage 1.0 (monitor F-43). Recorded as skipped, so the monitor sees why.
+        telemetry.agent_output("red_team", 0, 0, skipped="no symbols to review")
+        return {}
     out = _call_json(RED_TEAM_SYSTEM, "Desk data (JSON):\n" + json.dumps(payload, indent=1, default=str),
                      RED_TEAM_SCHEMA, acfg["model"], acfg["red_team_max_web_searches"], role="red_team",
                      composition=prompt_composition(payload))
