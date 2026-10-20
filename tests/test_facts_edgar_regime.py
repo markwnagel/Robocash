@@ -459,3 +459,43 @@ def test_an_asset_on_an_exchange_the_sdk_does_not_know_cannot_crash_the_universe
     out = list_candidate_assets(_T(), ucfg)
     assert "AAPL" in out and "CECO" not in out and "XYZ" not in out and "BRK.B" not in out
     assert list_candidate_assets(_T(), dict(ucfg, exchanges=list(ucfg["exchanges"]) + ["TXSE"])).count("CECO") == 1
+
+
+TXSE_POSITION = {"asset_id": "a6c9b7a0-0b1e-4c5e-9a43-3a0f0f7d5e11", "symbol": "CECO", "exchange": "TXSE",
+                 "asset_class": "us_equity", "avg_entry_price": "40.10", "qty": "12", "qty_available": "0",
+                 "side": "long", "market_value": "492.00", "cost_basis": "481.20", "unrealized_pl": "10.80",
+                 "unrealized_plpc": "0.0224", "unrealized_intraday_pl": "1.20", "unrealized_intraday_plpc": "0.0024",
+                 "current_price": "41.00", "lastday_price": "40.90", "change_today": "0.0024"}
+
+
+def test_a_holding_on_an_exchange_the_sdk_does_not_know_cannot_crash_the_stop_checks():
+    """F-39 follow-up: the SDK's Position model has the same fixed exchange list as Asset, so a held name moving
+    to TXSE would have failed get_all_positions() - the call the desk's protection step and the daily email make."""
+    import pytest
+    from pydantic import TypeAdapter, ValidationError
+    from alpaca.trading.models import Position
+    from desk.execution import Broker, raw_positions
+
+    with pytest.raises(ValidationError):                       # what the SDK path does with this record
+        TypeAdapter(list[Position]).validate_python([TXSE_POSITION])
+
+    class _T:
+        def get(self, path, params=None):
+            assert path == "/positions"
+            return [TXSE_POSITION]
+    assert raw_positions(_T()) == [TXSE_POSITION]
+    assert Broker(_T()).positions() == {"CECO": {"qty": 12.0, "avg_entry_price": 40.1, "current_price": 41.0,
+                                                 "market_value": 492.0, "unrealized_plpc": 0.0224}}
+
+
+def test_the_fact_sheet_reads_a_txse_name_s_asset_record():
+    from desk.facts import broker_asset_lookup
+
+    class _T:
+        def get(self, path, params=None):
+            assert path == "/assets/CECO"
+            return {"symbol": "CECO", "exchange": "TXSE", "name": "CECO Environmental Corp.", "shortable": True,
+                    "easy_to_borrow": True}
+    a = broker_asset_lookup(_T())("CECO")
+    assert a.name == "CECO Environmental Corp." and a.shortable is True
+    assert broker_asset_lookup(object()) is None               # a client without get(): no lookup, as before

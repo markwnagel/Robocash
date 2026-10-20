@@ -248,6 +248,16 @@ def test_a_brief_naming_the_wrong_regime_is_flagged_in_the_brief(wired, cfg, mon
     assert "WARNING: analyst brief says risk-off" in sent[-1]
 
 
+def test_a_brief_calling_a_candidate_no_trade_is_flagged_in_the_brief(wired, cfg, monkeypatch):
+    holder, sent = wired
+    holder["broker"] = FakeBroker()
+    monkeypatch.setattr(run_daily, "review", lambda payload, cfg_: {
+        "data_concerns": [], "brief": "b", "verdicts": [],
+        "no_trade_mismatch": "analyst brief says 'no trade' about PBF, but it is still being bought"})
+    run([])
+    assert "WARNING: analyst brief says 'no trade' about PBF" in sent[-1]
+
+
 def test_analyst_failure_blocks_new_entries_only(wired, cfg, monkeypatch):
     holder, sent = wired
     holder["broker"] = FakeBroker()

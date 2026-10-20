@@ -17,6 +17,13 @@ DEAD_ORDER_STATUSES = {"expired", "canceled", "rejected", "replaced", "done_for_
 LOOKBACK_DAYS = 90  # order-history window when looking for a position's live exit legs
 
 
+def raw_positions(trading: TradingClient) -> list:
+    """Open positions as plain JSON, not get_all_positions(). The SDK checks each position's exchange against
+    a fixed list, so one holding on an exchange it does not know (TXSE, 2026-10-19 - monitor F-39) would fail
+    the whole call, and with it the stop checks and the daily report. Nothing here reads the exchange."""
+    return trading.get("/positions") or []
+
+
 class Broker:
     def __init__(self, trading: TradingClient, dry_run: bool = False):
         self.t = trading
@@ -36,13 +43,13 @@ class Broker:
 
     def positions(self) -> dict:
         out = {}
-        for p in self.t.get_all_positions():
-            out[p.symbol] = {
-                "qty": float(p.qty),
-                "avg_entry_price": float(p.avg_entry_price),
-                "current_price": float(p.current_price or 0),
-                "market_value": float(p.market_value or 0),
-                "unrealized_plpc": float(p.unrealized_plpc or 0),
+        for p in raw_positions(self.t):
+            out[p["symbol"]] = {
+                "qty": float(p["qty"]),
+                "avg_entry_price": float(p["avg_entry_price"]),
+                "current_price": float(p.get("current_price") or 0),
+                "market_value": float(p.get("market_value") or 0),
+                "unrealized_plpc": float(p.get("unrealized_plpc") or 0),
             }
         return out
 

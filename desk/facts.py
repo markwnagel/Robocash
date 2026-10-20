@@ -11,6 +11,7 @@ import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import anthropic
 import numpy as np
@@ -277,6 +278,16 @@ def classify_headlines(by_symbol: dict, model: str) -> dict:
 
 
 # ----------------------------------------------------------------- builder
+
+def broker_asset_lookup(trading):
+    """symbol -> the broker's asset record, read as plain JSON (None when the client cannot do it).
+    get_asset() checks the exchange against the SDK's fixed list, so a name on TXSE (monitor F-39) came back
+    as unavailable and lost its company name, which the headline filter matches on."""
+    get = getattr(trading, "get", None)
+    if not callable(get):
+        return None
+    return lambda s: SimpleNamespace(**(get(f"/assets/{s}") or {}))
+
 
 class FactBuilder:
     def __init__(self, key: str, secret: str, cfg: dict, today: date, asset_lookup=None):

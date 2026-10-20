@@ -180,7 +180,8 @@ a drawdown or a down day is not a change of regime.
 You recommend; the desk's code executes. Never write that a trade happened ("trimmed", "sold", "cut", "bought", "exited") - your
 verdicts are applied after you write, and some are not applied at all. In particular a REDUCE on a position already held is not
 applied: it is recorded as a concern for the owner, and the position keeps its stop and target. Write "concern on X (no trade)",
-not "trimmed X" and not a request for the owner to trade."""
+not "trimmed X" and not a request for the owner to trade. "(no trade)" is only for a holding: a REDUCE on a candidate does not stop
+its entry (rules.reduce_sizing says what it does to the size), so write "concern on X (entry stands)" for a candidate."""
 
 ANALYST_SCHEMA = {
     "type": "object",
@@ -327,6 +328,10 @@ def review(payload: dict, cfg: dict) -> dict | None:
     out["regime_mismatch"] = brief_regime_mismatch(out["brief"], (payload.get("regime") or {}).get("label"))
     if out["regime_mismatch"]:
         log.warning(out["regime_mismatch"])
+    out["no_trade_mismatch"] = brief_no_trade_on_candidates(
+        out["brief"], out["verdicts"], {str(c.get("symbol", "")).upper() for c in payload.get("candidates", [])})
+    if out["no_trade_mismatch"]:
+        log.warning(out["no_trade_mismatch"])
     said = {str(v.get("symbol", "")).upper() for v in out["verdicts"]}
     actions = [str(v.get("action", "")).upper() for v in out["verdicts"]]
     telemetry.agent_output("analyst", len(asked), len(said & asked),
@@ -334,7 +339,8 @@ def review(payload: dict, cfg: dict) -> dict | None:
                            keep=actions.count("KEEP"), remove=actions.count("REMOVE"), reduce=actions.count("REDUCE"),
                            data_concerns=len(out["data_concerns"]), brief_words=len(out["brief"].split()),
                            brief_over_limit=len(out["brief"].split()) > 150,
-                           brief_regime_mismatch=bool(out["regime_mismatch"]))
+                           brief_regime_mismatch=bool(out["regime_mismatch"]),
+                           brief_no_trade_mismatch=bool(out["no_trade_mismatch"]))
     return out
 
 
@@ -350,6 +356,23 @@ def brief_regime_mismatch(brief: str, label: str | None) -> str | None:
     if not wrong:
         return None
     return f"analyst brief says risk-{sorted(wrong)[0]} but the desk's regime is {label} - the brief's regime wording is wrong"
+
+
+def brief_no_trade_on_candidates(brief: str, verdicts: list, candidates: set) -> str | None:
+    """A message when the brief says "no trade" about a candidate the analyst did not REMOVE, else None. The
+    2026-10-19 brief said it "recorded a concern (no trade)" on AVTR and PBF while both were being bought: the
+    wording is for a REDUCE on a holding, left over from before REDUCE stopped shrinking entries. Checked per
+    sentence, so a holding's "no trade" next to a candidate's name in another sentence is not flagged."""
+    removed = {str(v.get("symbol", "")).upper() for v in verdicts if str(v.get("action", "")).upper() == "REMOVE"}
+    bought = set(candidates) - removed - {""}
+    named = set()
+    for sentence in re.split(r"(?<=[.;!?])\s+", brief):
+        if re.search(r"no[- ]trade", sentence, re.I):
+            named |= {s for s in bought if re.search(rf"(?<![A-Za-z]){re.escape(s)}(?![A-Za-z])", sentence)}
+    if not named:
+        return None
+    return (f"analyst brief says 'no trade' about {', '.join(sorted(named))}, but "
+            f"{'it is' if len(named) == 1 else 'they are'} still being bought - 'no trade' only applies to a holding")
 
 
 def _facts_for(payload: dict, symbol: str) -> dict | None:

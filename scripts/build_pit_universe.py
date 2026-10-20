@@ -39,8 +39,6 @@ from alpaca.data.historical import StockHistoricalDataClient  # noqa: E402
 from alpaca.data.requests import StockBarsRequest  # noqa: E402
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit  # noqa: E402
 from alpaca.trading.client import TradingClient  # noqa: E402
-from alpaca.trading.enums import AssetClass, AssetStatus  # noqa: E402
-from alpaca.trading.requests import GetAssetsRequest  # noqa: E402
 
 from desk import pit  # noqa: E402
 from desk.config import alpaca_keys, load_config, require_paper  # noqa: E402
@@ -97,10 +95,12 @@ def candidate_pool(trading, snapshots: dict, bad: list) -> dict:
     for ts in sorted(snapshots):
         for sym, title in snapshots[ts].items():
             pool[sym] = {"name": title, "exchange": None, "source": "sec"}
-    for status in (AssetStatus.ACTIVE, AssetStatus.INACTIVE):
-        for a in trading.get_all_assets(GetAssetsRequest(status=status, asset_class=AssetClass.US_EQUITY)):
-            pool[a.symbol] = {"name": a.name or "", "exchange": a.exchange.value,
-                              "source": "alpaca-" + status.value}
+    # The raw list, as desk/data.py reads it: get_all_assets() rejects the whole list when one asset sits on an
+    # exchange the SDK does not know (TXSE, 2026-10-19).
+    for status in ("active", "inactive"):
+        for a in trading.get("/assets", {"status": status, "asset_class": "us_equity"}) or []:
+            pool[a["symbol"]] = {"name": a.get("name") or "", "exchange": a.get("exchange") or "",
+                                 "source": "alpaca-" + status}
     kept = {s: v for s, v in pool.items() if pit.keep_symbol(s, v["name"], v["exchange"], bad)}
     log.info("candidate pool: %d symbols seen, %d pass the name/venue rules", len(pool), len(kept))
     return kept
