@@ -33,7 +33,7 @@ from desk.analyst import analyst_rules, apply_verdicts, red_team, review
 from desk.config import alpaca_keys, load_config, release, require_paper
 from desk.data import SESSION_DONE, build_universe, cached_bars
 from desk.execution import Broker, sync_positions
-from desk.facts import FactBuilder, candidate_blockers, compact, insider_tilt, size_multiplier
+from desk.facts import FactBuilder, broker_asset_lookup, candidate_blockers, compact, insider_tilt, size_multiplier
 from desk.notify import send
 from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries, shrink_qty, size_position,
                             trail_stop)
@@ -335,7 +335,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     if cfg["facts"]["enabled"]:
         pool = [s for s in snap[snap["eligible"]].index if s not in st["positions"]][: cfg["facts"]["candidate_pool"]]
         try:
-            fb = FactBuilder(key, secret, cfg, today, asset_lookup=getattr(trading, "get_asset", None))
+            fb = FactBuilder(key, secret, cfg, today, asset_lookup=broker_asset_lookup(trading))
             facts = fb.build(sorted(set(pool) | set(st["positions"])), panel["close"])
         except Exception as e:
             # Fail closed, like the analyst: an unscreened candidate could be reporting tomorrow or mid-offering.
@@ -495,6 +495,8 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             notes += verdict_notes
             if analyst_out.get("regime_mismatch"):
                 notes.append(f"WARNING: {analyst_out['regime_mismatch']}")
+            if analyst_out.get("no_trade_mismatch"):
+                notes.append(f"WARNING: {analyst_out['no_trade_mismatch']}")
             notes += [f"data concern: {c}" for c in analyst_out.get("data_concerns", [])]
             for c in analyst_out.get("data_concerns", []):
                 telemetry.emit({"event": "data_concern", "source": "analyst", "text": telemetry.redact(c)[:500],

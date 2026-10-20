@@ -31,6 +31,7 @@ from desk.report_html import build_html
 from desk import schedule, telemetry
 from desk import trials as T
 from desk.evidence import live_vs_backtest
+from desk.execution import raw_positions
 from desk.state import STATE_DIR, atomic_write_text, load_state
 
 log = logging.getLogger("desk.report")
@@ -214,19 +215,20 @@ def main() -> None:
 
     acct = trading.get_account()
     equity, last_equity = float(acct.equity), float(acct.last_equity)
-    live = trading.get_all_positions()
+    live = raw_positions(trading)     # plain JSON: an exchange the SDK does not know cannot fail the email
     orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.ALL, nested=False, limit=500,
                                                  after=datetime.now() - timedelta(days=5)))
     filled_today = {o.symbol for o in orders if o.filled_at and o.filled_at.date() == today and o.side.value == "buy"}
 
     positions = []
     for p in live:
-        sp = st["positions"].get(p.symbol, {})
+        sym = p["symbol"]
+        sp = st["positions"].get(sym, {})
         positions.append({
-            "symbol": p.symbol, "qty": float(p.qty), "price": float(p.current_price),
-            "entry_price": float(p.avg_entry_price), "day_pct": float(p.unrealized_intraday_plpc or 0),
-            "total_pct": float(p.unrealized_plpc or 0), "stop": sp.get("stop"),
-            "filled_today": p.symbol in filled_today, "thesis": sp.get("thesis", ""), "entry_date": sp.get("entry_date"),
+            "symbol": sym, "qty": float(p["qty"]), "price": float(p.get("current_price") or 0),
+            "entry_price": float(p["avg_entry_price"]), "day_pct": float(p.get("unrealized_intraday_plpc") or 0),
+            "total_pct": float(p.get("unrealized_plpc") or 0), "stop": sp.get("stop"),
+            "filled_today": sym in filled_today, "thesis": sp.get("thesis", ""), "entry_date": sp.get("entry_date"),
         })
 
     staged = []
@@ -271,7 +273,7 @@ def main() -> None:
     links = {}
     for sym in sorted(tickers):
         try:
-            url = quote_url(sym, trading.get_asset(sym).exchange.value)
+            url = quote_url(sym, trading.get(f"/assets/{sym}").get("exchange"))     # raw, as for positions
         except Exception:
             url = None
         if url:

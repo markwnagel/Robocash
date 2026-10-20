@@ -312,3 +312,29 @@ def test_with_the_sizing_arm_retired_the_analyst_is_told_reduce_keeps_full_size(
     out = apply_verdicts(v, {}, e, 1.0)
     kept = [x for x in out[0] if x["symbol"] == "AAA"] if isinstance(out[0], list) else None
     assert kept and kept[0]["qty"] == 7 and "insider selling" in kept[0]["thesis"]
+
+
+def test_a_brief_calling_a_bought_candidate_no_trade_is_caught(monkeypatch):
+    """2026-10-19: the brief said it "recorded a concern (no trade)" on AVTR and PBF while both were being bought.
+    "(no trade)" is the wording for a REDUCE on a holding; a REDUCE on a candidate leaves its entry standing."""
+    from desk import analyst
+    m = analyst.brief_no_trade_on_candidates
+    reduce_both = [{"symbol": "AVTR", "action": "REDUCE"}, {"symbol": "PBF", "action": "REDUCE"}]
+    got = m("Nothing was vetoed. I recorded a concern (no trade) on AVTR and PBF.", reduce_both, {"AVTR", "PBF", "HNGE"})
+    assert got and "AVTR, PBF" in got and "still being bought" in got
+    # A holding's "no trade" is right, and a candidate named in another sentence is not part of it.
+    assert m("Concern on TEAM (no trade). AVTR is a buy.", reduce_both, {"AVTR", "PBF"}) is None
+    # A candidate the analyst removed really is not traded.
+    assert m("PBF: no trade, dilutive offering.", [{"symbol": "PBF", "action": "REMOVE"}], {"PBF"}) is None
+    # A symbol inside a longer word is not a mention.
+    assert m("No trade on SPBF.", [], {"PBF"}) is None
+    assert m("Concern on AVTR (entry stands).", reduce_both, {"AVTR"}) is None
+    # review() sets it from the payload's candidates and records it on the agent_output event.
+    events = []
+    monkeypatch.setattr(analyst.telemetry, "agent_output", lambda *a, **k: events.append(k))
+    monkeypatch.setattr(analyst, "_call_json", lambda *a, **k: {"data_concerns": [], "verdicts": reduce_both,
+                                                                "brief": "Concern on AVTR (no trade)."})
+    out = analyst.review({"candidates": [{"symbol": "AVTR"}, {"symbol": "PBF"}]},
+                         {"analyst": {"model": "m", "max_web_searches": 0}})
+    assert "AVTR" in out["no_trade_mismatch"] and events[-1]["brief_no_trade_mismatch"] is True
+    assert '"concern on X (entry stands)" for a candidate' in analyst.ANALYST_SYSTEM

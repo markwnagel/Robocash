@@ -189,6 +189,10 @@ def test_the_monitor_gets_numbers_for_the_headline_filter_and_the_web_cap():
     rt = M.role_signals(ev)["red_team"]
     assert rt["contract"]["web_only_capped"] == 1 and rt["contract"]["web_citations_dated"] == 2
     assert rt["web_citation_max_age_days"] == 376
+    # The analyst's brief checks reach the monitor too (F-37's was emitted but not listed until 2026-10-20).
+    an = M.role_signals([{"event": "agent_output", "role": "analyst", "requested": 9, "returned": 9,
+                          "brief_regime_mismatch": True, "brief_no_trade_mismatch": False}])["analyst"]
+    assert an["contract"] == {"brief_regime_mismatch": 1, "brief_no_trade_mismatch": 0}
     assert M.feed_signals(ev) == {"news": {"symbols": 3, "kept": 15, "dropped_unrelated": 7,
                                            "most_dropped": [["DELL", 5], ["INTC", 2]]}}
 
