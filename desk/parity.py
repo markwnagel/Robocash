@@ -96,7 +96,12 @@ def compare_entries(bt_entries: list, live_bought: pd.DataFrame, book: pd.DataFr
             first_live.setdefault(sym, j)
     only_live = sorted((dates[j].date().isoformat(), s) for s, j in first_live.items())
     total = len(lags) + len(only_bt) + len(only_live)
+    # How much of the backtest-only side is a live gate the replay does not apply (a hard-filter block or an analyst
+    # veto), as opposed to a genuinely different pick - the monitor kept reading the whole gap as unexplained
+    # (R-50, R-53, 2026-10-21).
+    gated = sum(1 for _, s in only_bt if s in why)
     return {"overlap": round(len(lags) / total, 3) if total else None, "both": len(lags),
+            "match_tolerance_days": tolerance, "backtest_only_gated_live": gated,
             "backtest_only": len(only_bt), "live_only": len(only_live),
             "median_lag_days": float(pd.Series(lags).median()) if lags else None,
             "backtest_only_names": [f"{d} {s}" + (f" ({why[s]})" if s in why else "") for d, s in only_bt][-10:],
@@ -184,7 +189,11 @@ def markdown(res: dict) -> list:
                 f"SPY {res['since_release']['spy_return']:+.1%}"] if res.get("since_release") else []),
              f"- cash: live {res['live_cash_share']:.0%}, backtest {res['backtest_cash_share']:.0%}",
              f"- entries: {e['both']} in both, {e['backtest_only']} backtest only, {e['live_only']} live only "
-             f"(overlap {e['overlap']})"]
+             f"(overlap {e['overlap']}; a name staged by both within {e.get('match_tolerance_days', 5)} trading days "
+             f"counts as a match)"]
+    if e.get("backtest_only_gated_live"):
+        lines.append(f"  - {e['backtest_only_gated_live']} of the {e['backtest_only']} backtest-only names were kept out "
+                     f"live by a gate the replay does not apply (a hard-filter block or an analyst veto)")
     if e.get("median_lag_days") is not None:
         lines.append(f"  - matched names were staged live a median {e['median_lag_days']:+.0f} trading days after the backtest")
     if e["backtest_only_names"]:

@@ -358,10 +358,17 @@ def llm_call(role: str, model: str, started: float, responses: list | None = Non
     u = usage_of(responses)
     last = responses[-1] if responses else None
     served = getattr(last, "model", None) or model
-    emit({"event": "llm_call", "role": role, "model": model, "served_by": served,
+    latency = round(time.monotonic() - started, 2)
+    # An event's ts is when the call FINISHED. Read as its start, a 470s monitor call looked like it began as the
+    # report job started - a false "email sent before the monitor finished" (monitor F-48, 2026-10-21). started_at
+    # says when it began; price_per_mtok is the basis cost_usd used, so a model change shows as a field, not as
+    # cost arithmetic (R-52, F-44).
+    started_at = (datetime.now(timezone.utc) - timedelta(seconds=latency)).isoformat(timespec="seconds")
+    emit({"event": "llm_call", "role": role, "model": model, "served_by": served, "started_at": started_at,
+          "price_per_mtok": list(PRICES[served]) if served in PRICES else None,
           "fallback": bool(last is not None and served != model), "outcome": outcome,
           "stop_reason": getattr(last, "stop_reason", None), "turns": len(responses),
-          "latency_s": round(time.monotonic() - started, 2), **u, **server_tool_activity(responses),
+          "latency_s": latency, **u, **server_tool_activity(responses),
           "cost_usd": cost_usd(served, u),
           "web_search_usd": round(u["web_searches"] * WEB_SEARCH_USD, 4),
           "error": redact(error)[:500] if error else None, **fields})

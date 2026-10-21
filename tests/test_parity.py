@@ -39,3 +39,17 @@ def test_a_large_gap_raises_sev2_and_the_report_shows_it():
     md = "\n".join(parity.markdown(res))
     assert "gap -6.1 pts" in md and "cash: live 50%, backtest 22%" in md and "x DELL" in md
     assert "unavailable" in "\n".join(parity.markdown({"error": "boom"}))
+
+
+def test_the_comparison_states_its_tolerance_and_how_much_is_a_live_gate():
+    """2026-10-21: the monitor called the matcher date-exact and the backtest-only side unexplained (R-50, R-53)."""
+    dates = pd.bdate_range("2026-10-01", periods=15)
+    d = lambda i: dates[i].date().isoformat()  # noqa: E731
+    bt = [{"date": dates[3], "symbol": "MRNA"}, {"date": dates[5], "symbol": "CNC"}]
+    book = pd.DataFrame([{"date": d(2), "kind": "blocked", "symbol": "MRNA", "reason": "dilutive filing: 8-K 3.02"}])
+    e = parity.compare_entries(bt, pd.DataFrame(columns=["date", "symbol"]), book, dates, tolerance=5)
+    assert e["match_tolerance_days"] == 5 and e["backtest_only"] == 2 and e["backtest_only_gated_live"] == 1
+    res = {"window": "a to b", "live_return": 0.0, "backtest_return": 0.0, "spy_return": 0.0, "equity_gap_pts": 0.0,
+           "live_cash_share": 0.3, "backtest_cash_share": 0.2, "entries": e}
+    md = "\n".join(parity.markdown(res))
+    assert "within 5 trading days counts as a match" in md and "1 of the 2 backtest-only names were kept out live" in md
