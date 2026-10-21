@@ -54,6 +54,7 @@ data shows it is wrong, and then say why. Set escalate true only when there is a
 `parity` replays the backtest over the live period (desk/parity.py): report the live-vs-backtest gap and its causes
 in a "Live vs backtest" section - the analyst, red team and fills are not simulated, so some gap is expected; flag
 causes that look like a mismatch between the code and what was tested. api_spend_month_to_date is the API spend.
+An llm_call's ts is when the call finished; started_at is when it began (time order of jobs: run_start/run_end).
 
 """
 

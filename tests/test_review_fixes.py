@@ -137,3 +137,23 @@ def test_the_classifier_is_told_who_counts_as_an_insider():
     """Monitor R-54 / F-46: a US Representative's DDOG purchase was noted as insider buying."""
     from desk.facts import CLASSIFIER_SYSTEM
     assert "Form 4 filers" in CLASSIFIER_SYSTEM and "politician" in CLASSIFIER_SYSTEM
+
+
+def test_a_model_call_records_when_it_started_and_its_price_basis(tmp_path, monkeypatch):
+    """F-48 (2026-10-21) was a misread: an llm_call's ts is when it finished. R-52: the price basis is a field."""
+    import time
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace as NS
+    from desk import telemetry as T
+    seen = []
+    monkeypatch.setattr(T, "emit", lambda e: seen.append(e))
+    resp = NS(model="claude-sonnet-5", stop_reason="end_turn", content=[],
+              usage=NS(input_tokens=1000, output_tokens=200, cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                       server_tool_use=None))
+    T.llm_call("headline_classifier", "claude-sonnet-5", time.monotonic() - 30, [resp])
+    e = seen[-1]
+    assert e["price_per_mtok"] == [2.0, 10.0] and e["latency_s"] >= 30
+    started = datetime.fromisoformat(e["started_at"])
+    assert abs((datetime.now(started.tzinfo) - started) - timedelta(seconds=30)) < timedelta(seconds=3)
+    T.llm_call("x", "some-unpriced-model", time.monotonic(), [])
+    assert seen[-1]["price_per_mtok"] is None and seen[-1]["cost_usd"] is None
