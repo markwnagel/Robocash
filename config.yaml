@@ -286,7 +286,9 @@ monitor:                       # agent reliability monitor (monitor.py): runs we
       expected_output: one result per requested symbol, schema-valid JSON.
       slos: {task_success_rate: "none - baseline only", p95_latency: "none - baseline only", cost_per_task: "none - baseline only", max_turns: 1}
     - name: red-team
-      purpose: Strongest bear case per candidate and holding, with trap type and severity in [0, 1].
+      purpose: Strongest bear case per buy candidate, with trap type and severity in [0, 1]. Scope is candidates only by
+        policy (analyst.red_team_scope, 2026-10-17 cost cut) - holdings are reviewed by the analyst with their fact sheets.
+        On a day with no candidates it is not called and records agent_output skipped (not a failure).
       code_location: desk/analyst.py red_team
       owner: mark@markwnagel.com
       expected_output: one case per requested symbol; trap_type from the enum; severity within [0, 1].

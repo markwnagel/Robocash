@@ -53,3 +53,30 @@ def test_the_comparison_states_its_tolerance_and_how_much_is_a_live_gate():
            "live_cash_share": 0.3, "backtest_cash_share": 0.2, "entries": e}
     md = "\n".join(parity.markdown(res))
     assert "within 5 trading days counts as a match" in md and "1 of the 2 backtest-only names were kept out live" in md
+
+
+def test_the_gap_is_attributed_in_points_and_adds_up():
+    """Monitor R-58 (2026-10-22): the 5.2-point gap had no breakdown. Each entry is valued and sorted by cause."""
+    dates = pd.bdate_range("2026-10-01", periods=20)
+    d = lambda i: dates[i].date().isoformat()  # noqa: E731
+    log = [{"date": dates[2], "symbol": "TEAM", "price": 100.0, "qty": 10},     # both took it
+           {"date": dates[4], "symbol": "MRNA", "price": 50.0, "qty": 10},      # live gate kept it out
+           {"date": dates[6], "symbol": "IOVA", "price": 10.0, "qty": 100}]     # backtest only, still open
+    bt_trades = pd.DataFrame([{"symbol": "TEAM", "entry_date": dates[2].date(), "pnl": 200.0},
+                              {"symbol": "MRNA", "entry_date": dates[4].date(), "pnl": -100.0}])
+    last = pd.Series({"IOVA": 12.0})
+    live_closed = pd.DataFrame([{"symbol": "TEAM", "entry_date": d(1), "pnl": -150.0},
+                                {"symbol": "NTNX", "entry_date": d(9), "pnl": -50.0}])
+    live_open = [("SN", {"entry_date": d(10), "entry_price": 20.0, "last_price": 21.0, "qty": 10})]
+    bought = pd.DataFrame([{"date": d(1), "symbol": "TEAM"}, {"date": d(9), "symbol": "NTNX"}, {"date": d(10), "symbol": "SN"}])
+    a = parity.attribute(log, bt_trades, last, live_closed, live_open, bought, {"MRNA"}, dates, 10000.0, gap_pts=-5.4)
+    assert a["matched_live"] == -1.5 and a["matched_backtest"] == 2.0 and a["matched_difference"] == -3.5
+    assert a["backtest_only_gated"] == -1.0 and a["backtest_only_other"] == 2.0 and a["live_only"] == -0.4
+    assert a["residual"] == round(-5.4 - ((-1.5 - 0.4) - (2.0 - 1.0 + 2.0)), 2)       # -0.5: fills, sizing, cash
+    md = "\n".join(parity.markdown({"window": "a", "live_return": 0, "backtest_return": 0, "spy_return": 0,
+                                    "equity_gap_pts": -5.4, "live_cash_share": 0.5, "backtest_cash_share": 0.2,
+                                    "attribution_pts": a,
+                                    "entries": {"overlap": 1, "both": 1, "backtest_only": 2, "live_only": 2,
+                                                "median_lag_days": None, "backtest_only_names": [],
+                                                "live_only_names": []}}))
+    assert "same names -3.5" in md and "backtest-only kept out live +1.0" in md and "fills, sizing and idle cash -0.5" in md

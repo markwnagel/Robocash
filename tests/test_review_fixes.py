@@ -157,3 +157,17 @@ def test_a_model_call_records_when_it_started_and_its_price_basis(tmp_path, monk
     assert abs((datetime.now(started.tzinfo) - started) - timedelta(seconds=30)) < timedelta(seconds=3)
     T.llm_call("x", "some-unpriced-model", time.monotonic(), [])
     assert seen[-1]["price_per_mtok"] is None and seen[-1]["cost_usd"] is None
+
+
+def test_the_monitor_sees_which_model_answered_its_price_and_deliberate_skips():
+    """F-44 read the classifier's move to Sonnet as an unexplained cost drop twice: role_signals dropped the model.
+    F-49: the red team's no-candidate skip was only a brief note."""
+    ev = [{"event": "llm_call", "role": "classifier", "model": "claude-sonnet-5", "served_by": "claude-sonnet-5",
+           "price_per_mtok": [2.0, 10.0], "outcome": "ok", "cost_usd": 0.07, "ts": "2026-10-22T20:43:40+00:00",
+           "started_at": "2026-10-22T20:42:55+00:00"},
+          {"event": "agent_output", "role": "red_team", "requested": 0, "returned": 0,
+           "skipped": "no candidates (red_team_scope: candidates)", "holdings": 12}]
+    s = M.role_signals(ev)
+    assert s["classifier"]["models"] == {"claude-sonnet-5": 1} and s["classifier"]["price_per_mtok"] == [(2.0, 10.0)]
+    assert s["classifier"]["calls_detail"][0]["started_at"] == "2026-10-22T20:42:55+00:00"
+    assert s["red_team"]["skipped"] == {"no candidates (red_team_scope: candidates)": 1}

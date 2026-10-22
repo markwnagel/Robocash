@@ -466,6 +466,9 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             # Candidates-only scope on a day with none: nothing to review. It used to be called with zero symbols,
             # log the empty reply as ok, and the brief said "unavailable" (monitor F-43, 2026-10-20).
             notes.append("red team: nothing to review today (it reviews candidates only, and there are none)")
+            # A metric, not only a brief note (monitor R-57, F-49): the skip is policy and the monitor can count it.
+            telemetry.agent_output("red_team", 0, 0, skipped="no candidates (red_team_scope: candidates)",
+                                   holdings=len(payload.get("holdings") or []))
         elif cfg["analyst"].get("red_team_enabled"):
             cases = red_team(rt_view, cfg)
             if cases:

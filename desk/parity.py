@@ -108,6 +108,59 @@ def compare_entries(bt_entries: list, live_bought: pd.DataFrame, book: pd.DataFr
             "live_only_names": [f"{d} {s}" for d, s in only_live][-10:]}
 
 
+def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live_closed: pd.DataFrame,
+              live_open: list, live_bought: pd.DataFrame, gated: set, dates: pd.DatetimeIndex, capital: float,
+              gap_pts: float, tolerance: int = 5) -> dict:
+    """The gap in percentage points, by cause (monitor R-58, 2026-10-22). Each entry is valued at its result -
+    a closed trade's P&L, an open one marked at the last close - and sorted: names both sides took (within
+    `tolerance` trading days), names only the backtest took because a live gate kept them out (`gated`), other
+    backtest-only names, and live-only names. What the entries do not explain - fills, slippage, the size of each
+    position, idle cash - is the residual."""
+    pos = {d: i for i, d in enumerate(dates)}
+    live_days = {}
+    for r in live_bought.to_dict("records"):
+        if pd.Timestamp(r["date"]) in pos:
+            live_days.setdefault(r["symbol"], []).append(pos[pd.Timestamp(r["date"])])
+    bt_days = {}
+    pnl_closed = {}
+    if len(bt_trades):
+        for r in bt_trades.to_dict("records"):
+            k = (r["symbol"], pd.Timestamp(r["entry_date"]))
+            pnl_closed[k] = pnl_closed.get(k, 0.0) + float(r["pnl"])
+    pts = {"matched_live": 0.0, "matched_backtest": 0.0, "backtest_only_gated": 0.0, "backtest_only_other": 0.0,
+           "live_only": 0.0}
+    near = lambda days, i: any(abs(j - i) <= tolerance for j in days)  # noqa: E731
+    for e in bt_entries:
+        i = pos.get(pd.Timestamp(e["date"]))
+        if not i:
+            continue
+        sig = i - 1
+        bt_days.setdefault(e["symbol"], []).append(sig)
+        k = (e["symbol"], pd.Timestamp(e["date"]))
+        v = pnl_closed[k] if k in pnl_closed else (float(last_close.get(e["symbol"], e["price"])) - e["price"]) * e["qty"]
+        if near(live_days.get(e["symbol"], []), sig):
+            pts["matched_backtest"] += v
+        elif e["symbol"] in gated:
+            pts["backtest_only_gated"] += v
+        else:
+            pts["backtest_only_other"] += v
+    rows = [(str(r["symbol"]), str(r["entry_date"]), float(r["pnl"])) for r in live_closed.to_dict("records")]
+    rows += [(s, str(p["entry_date"]), (float(p.get("last_price") or p["entry_price"]) - float(p["entry_price"]))
+              * float(p["qty"])) for s, p in live_open]
+    for sym, d, v in rows:
+        i = pos.get(pd.Timestamp(d))
+        if i is not None and near(bt_days.get(sym, []), i):
+            pts["matched_live"] += v
+        else:
+            pts["live_only"] += v
+    out = {k: round(100 * v / capital, 2) for k, v in pts.items()}
+    explained = (out["matched_live"] + out["live_only"]) - (out["matched_backtest"] + out["backtest_only_gated"]
+                                                           + out["backtest_only_other"])
+    out["matched_difference"] = round(out["matched_live"] - out["matched_backtest"], 2)
+    out["residual"] = round(gap_pts - explained, 2)
+    return out
+
+
 def run(cfg: dict, data=None, start: date | None = None, end: date | None = None) -> dict:
     """Replay and compare. {} before there is a live history."""
     import backtest as B
@@ -142,6 +195,19 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
     spy_ret = float(spy[spy.index <= pd.Timestamp(end)].iloc[-1] / spy[spy.index <= pd.Timestamp(start)].iloc[-1] - 1)
     bought = book[book["kind"] == "bought"] if len(book) else pd.DataFrame(columns=["date", "symbol"])
     ent = compare_entries(log, bought, book, panel["close"].index, last_day=end.isoformat())
+    gated = {r["symbol"] for r in book.to_dict("records") if r["kind"] in ("blocked", "analyst_remove")} if len(book) else set()
+    st = _state.load_state()
+    trades_file = _state.TRADES_FILE
+    live_closed = pd.read_csv(trades_file) if Path(trades_file).exists() else pd.DataFrame(columns=["symbol", "entry_date", "pnl"])
+    live_closed = live_closed[live_closed["symbol"] != "symbol"]
+    live_closed = live_closed[pd.to_datetime(live_closed["entry_date"]) >= pd.Timestamp(start)]
+    live_open = [(s, p) for s, p in st["positions"].items() if p.get("filled") and p.get("entry_price")]
+    gap = round(100 * (live_last / capital - bt_last / float(bt_eq.iloc[0])), 2)
+    try:
+        attr = attribute(log, trades, panel["close"].ffill().iloc[-1], live_closed, live_open, bought, gated,
+                         panel["close"].index, capital, gap)
+    except Exception as e:                       # attribution is a breakdown, never a reason the replay fails
+        attr = {"error": f"{type(e).__name__}: {e}"}
     from .config import release
     rel = release(cfg)
     since = {}
@@ -160,7 +226,7 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
             "live_cash_share": round(float((eq["cash"] / eq["equity"]).mean()), 3),
             "backtest_cash_share": round(float((curve["cash"] / curve["equity"]).mean()), 3),
             "entries": ent, "backtest_trades_closed": int(len(trades)), "backtest_entries": len(log),
-            "since_release": since}
+            "since_release": since, "attribution_pts": attr}
 
 
 def alarms(res: dict, cfg: dict, today: date) -> list:
@@ -191,6 +257,12 @@ def markdown(res: dict) -> list:
              f"- entries: {e['both']} in both, {e['backtest_only']} backtest only, {e['live_only']} live only "
              f"(overlap {e['overlap']}; a name staged by both within {e.get('match_tolerance_days', 5)} trading days "
              f"counts as a match)"]
+    a = res.get("attribution_pts") or {}
+    if a and "error" not in a:
+        lines.append(f"- the gap by cause, in points: same names {a['matched_difference']:+.1f} (live {a['matched_live']:+.1f} "
+                     f"vs backtest {a['matched_backtest']:+.1f}); backtest-only kept out live {-a['backtest_only_gated']:+.1f}; "
+                     f"other backtest-only {-a['backtest_only_other']:+.1f}; live-only {a['live_only']:+.1f}; "
+                     f"fills, sizing and idle cash {a['residual']:+.1f}")
     if e.get("backtest_only_gated_live"):
         lines.append(f"  - {e['backtest_only_gated_live']} of the {e['backtest_only']} backtest-only names were kept out "
                      f"live by a gate the replay does not apply (a hard-filter block or an analyst veto)")
