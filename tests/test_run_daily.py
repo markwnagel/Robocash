@@ -857,3 +857,5 @@ def test_a_day_with_no_candidates_skips_the_red_team_and_says_why(wired, cfg, mo
     run([])
     assert called == []
     assert "red team: nothing to review today" in sent[-1] and "red team unavailable" not in sent[-1]
+    skips = [e for e in _telemetry_events() if e.get("event") == "agent_output" and e.get("role") == "red_team"]
+    assert skips and skips[-1]["skipped"].startswith("no candidates") and skips[-1]["holdings"] >= 1     # R-57

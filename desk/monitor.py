@@ -101,6 +101,11 @@ def role_signals(events: list) -> dict:
         ret = sum(x.get("returned") or 0 for x in o if x.get("returned") is not None)
         out[role] = {
             "calls": len(c), "outcomes": dict(outcomes),
+            # Which model answered and at what price - recorded on every call (served_by since R-19, price_per_mtok
+            # since 2026-10-21) but not passed on, so the classifier's move to Sonnet read twice as an unexplained
+            # cost drop (F-44, 10-20 and 10-22).
+            "models": dict(Counter(x.get("served_by") or x.get("model") for x in c)),
+            "price_per_mtok": sorted({tuple(x["price_per_mtok"]) for x in c if x.get("price_per_mtok")}),
             "error_rate": round(1 - outcomes.get("ok", 0) / len(c), 3) if c else None,
             "fallback_served": sum(1 for x in c if x.get("fallback")),
             "stop_reasons": dict(Counter(x.get("stop_reason") for x in c)),
@@ -120,12 +125,14 @@ def role_signals(events: list) -> dict:
             "input_tokens_by_web_searches": {
                 str(k): robust([x.get("input_tokens") for x in c if (x.get("web_searches") or 0) == k])
                 for k in sorted({x.get("web_searches") or 0 for x in c})},
-            "calls_detail": [{k: x.get(k) for k in ("ts", "run_id", "input_tokens", "output_tokens", "web_searches",
+            "calls_detail": [{k: x.get(k) for k in ("ts", "started_at", "run_id", "served_by", "price_per_mtok",
+                                                    "input_tokens", "output_tokens", "web_searches",
                                                     "web_fetches", "server_blocks", "server_result_chars",
                                                     "prompt_symbols", "input_chars", "prompt_fact_chars", "latency_s")}
                              for x in c[-10:]],
             "max_turns": max((x.get("turns") or 0 for x in c), default=0),
             "outputs": len(o), "no_answer": sum(1 for x in o if x.get("returned") is None),
+            "skipped": dict(Counter(x["skipped"] for x in o if x.get("skipped"))),
             "coverage": round(ret / req, 3) if req else None,
             # Every counter a role reports about its own output. web_only_capped was emitted from 2026-10-09 but not
             # listed here, so the monitor could not see the fix it was verifying (R-38); brief_regime_mismatch (F-37)
