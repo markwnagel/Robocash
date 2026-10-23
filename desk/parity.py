@@ -289,16 +289,22 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
 
 
 def alarms(res: dict, cfg: dict, today: date) -> list:
-    """SEV2 when live has drifted from the backtest by more than parity.equity_gap_alarm_pts."""
+    """SEV2 when live has drifted from the backtest by more than parity.equity_gap_alarm_pts since the current release
+    began. The full-window gap is still reported; it mostly predates the release and alarmed every day (2026-10-23)."""
     lim = float((cfg.get("parity") or {}).get("equity_gap_alarm_pts", 5.0))
-    gap = (res or {}).get("equity_gap_pts")
+    sr = (res or {}).get("since_release")
+    if sr and sr.get("live_return") is not None and sr.get("backtest_return") is not None:
+        gap, span = (sr["live_return"] - sr["backtest_return"]) * 100, f"since {sr['release']} ({sr['from']} close)"
+    else:
+        gap, span = (res or {}).get("equity_gap_pts"), (res or {}).get("window")
     if gap is None or abs(gap) <= lim:
         return []
     return [{"key": f"parity-gap-{today:%Y-%m-%d}", "severity": "SEV2",
-             "title": f"Live is {gap:+.1f} pts from the backtest over {res['window']}",
-             "detail": f"live {res['live_return']:+.1%}, backtest {res['backtest_return']:+.1%}, SPY {res['spy_return']:+.1%}; "
-                       f"cash live {res['live_cash_share']:.0%} vs backtest {res['backtest_cash_share']:.0%}; entry overlap "
-                       f"{res['entries']['overlap']}. The days that differ are in the report's Parity section."}]
+             "title": f"Live is {gap:+.1f} pts from the backtest {span}",
+             "detail": f"full window {res['window']}: live {res['live_return']:+.1%}, backtest {res['backtest_return']:+.1%}, "
+                       f"SPY {res['spy_return']:+.1%}; cash live {res['live_cash_share']:.0%} vs backtest "
+                       f"{res['backtest_cash_share']:.0%}; entry overlap {res['entries']['overlap']}. "
+                       f"The days that differ are in the report's Parity section."}]
 
 
 def markdown(res: dict) -> list:

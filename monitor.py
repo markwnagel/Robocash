@@ -272,6 +272,7 @@ def main() -> None:
         "parity": par,
         "release": cfg.get("release"),
         "open_findings": open_f, "previous_recommendations": recs,
+        "owner_decisions": mcfg.get("owner_decisions") or [],
     }
 
     result, reason, analysis = None, "skipped (--no-llm)", "deterministic"

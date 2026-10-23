@@ -25,6 +25,7 @@ from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, GetPor
 from desk.config import alpaca_keys, load_config, release, require_paper
 from desk.data import fetch_daily_bars
 from desk.notify import send, send_email
+from desk.monitor import parked
 from desk.report import (build_report, diff_fingerprint, fingerprint, holdings_at_close, load_json, movers,
                          notable_news, performance, plain_summaries, quote_url)
 from desk.report_html import build_html
@@ -122,7 +123,9 @@ def health_today(today: date) -> dict:
     if h.get("date") != today.isoformat():
         return {"status": "missing", "summary": "The agent monitor did not run today - no health check.",
                 "findings": [], "recommendations": []}
-    return h
+    # Parked findings stay in the monitor's report and state; the email shows only the live ones.
+    fs = h.get("findings", [])
+    return {**h, "findings": [f for f in fs if not parked(f)], "parked": sum(map(parked, fs))}
 
 
 def evidence_today(cfg: dict, equity: pd.Series) -> dict:

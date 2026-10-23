@@ -414,8 +414,10 @@ MONITOR_SCHEMA = {
                 "severity": {"type": "string", "enum": SEVERITIES},
                 "trend": {"type": "string", "enum": ["new", "ongoing", "worsening", "improving"]},
                 "agents": {"type": "array", "items": {"type": "string"}},
+                "quiet_windows": {"type": "integer"},
             },
-            "required": ["id", "signature", "title", "severity", "trend", "agents"], "additionalProperties": False}},
+            "required": ["id", "signature", "title", "severity", "trend", "agents", "quiet_windows"],
+            "additionalProperties": False}},
         "recommendations": {"type": "array", "items": {
             "type": "object",
             "properties": {
@@ -432,6 +434,15 @@ MONITOR_SCHEMA = {
                  "escalate", "escalation_summary"],
     "additionalProperties": False,
 }
+
+
+PARK_AFTER = 3   # reviews in a row with no new evidence before a SEV3/SEV4 finding is parked
+
+
+def parked(f: dict) -> bool:
+    """A SEV3/SEV4 finding with no new evidence for PARK_AFTER reviews: kept open, listed in one line, left out of
+    the daily email. New evidence resets quiet_windows and brings it back."""
+    return f.get("severity") in ("SEV3", "SEV4") and int(f.get("quiet_windows") or 0) >= PARK_AFTER
 
 
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]

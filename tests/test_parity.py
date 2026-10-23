@@ -80,3 +80,18 @@ def test_the_gap_is_attributed_in_points_and_adds_up():
                                                 "median_lag_days": None, "backtest_only_names": [],
                                                 "live_only_names": []}}))
     assert "same names -3.5" in md and "backtest-only kept out live +1.0" in md and "fills, sizing and idle cash -0.5" in md
+
+
+def test_the_alarm_judges_the_gap_since_the_release_not_the_whole_window():
+    """2026-10-23: a -5 pt full-window gap, mostly from v1, alarmed daily and forced a daily model review."""
+    res = {"window": "a to b", "live_return": -0.049, "backtest_return": 0.0004, "spy_return": -0.006,
+           "equity_gap_pts": -5.2, "live_cash_share": 0.48, "backtest_cash_share": 0.2, "entries": {"overlap": 0.53},
+           "since_release": {"release": "v2.0", "from": "2026-10-16", "live_return": 0.0157,
+                             "backtest_return": 0.0191, "spy_return": -0.0043}}
+    cfg = {"parity": {"equity_gap_alarm_pts": 5}}
+    assert parity.alarms(res, cfg, date(2026, 10, 23)) == []
+    bad = dict(res, since_release=dict(res["since_release"], live_return=-0.05))
+    a = parity.alarms(bad, cfg, date(2026, 10, 23))
+    assert len(a) == 1 and "since v2.0" in a[0]["title"] and "-6.9 pts" in a[0]["title"]
+    no_release = {k: v for k, v in res.items() if k != "since_release"}
+    assert parity.alarms(no_release, cfg, date(2026, 10, 23))[0]["title"].endswith("a to b")

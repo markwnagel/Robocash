@@ -515,6 +515,8 @@ def build_report(ctx: dict) -> str:
         L += _wrap(f"{h['status'].upper()}" + (f" - {summary}" if summary else ""), indent="  ")
         L += [f"  [{f['severity']}] {f['id']} {f['title']}" + (f" ({f['trend']})" if f.get("trend") else "")
               for f in h.get("findings", [])[:8]]
+        if h.get("parked"):
+            L.append(f"  + {h['parked']} parked (no new evidence for 3+ reviews; listed in the full report)")
         L += [f"  recommended [{r['priority']}] {r['id']} {r['title']}" for r in h.get("recommendations", [])[:5]]
         if h.get("report"):
             L.append(f"  full report: {h['report']}")
