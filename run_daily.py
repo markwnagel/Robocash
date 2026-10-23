@@ -169,7 +169,8 @@ def main() -> None:
                    data_concerns=count("data concern:"), session_open=session_open,
                    partial_bar=count("session still in progress") > 0, regime=plan.get("regime_label", "n/a"),
                    regime_state=plan.get("regime", "n/a"),
-                   protect_only=protect_only, decision_failed=failure is not None)
+                   protect_only=protect_only, decision_failed=failure is not None,
+                   holding_ranks=plan.get("holding_ranks") or {})
     if failure is not None:
         raise failure
 
@@ -359,6 +360,10 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     shadow_rows = [shadow.row(today, "blocked", s, float(snap.loc[s, "close"]), float(snap.loc[s, "atr"]), ecfg,
                               reason=r, rank=int(snap.loc[s, "rank"]))
                    for s, r in blocked.items() if s in snap.index and bool(snap.loc[s, "eligible"])]
+    # Holdings are judged on the full-universe ranking, as the backtest judges them. The re-ranks below are for
+    # choosing entries: they drop blocked and un-fact-checked names, which lifted every holding's rank - INTC at
+    # 47 and UMC at 47 stayed "inside 40" live until they went ineligible (2026-10-05..14, parity review 10-23).
+    rank_snap = snap
     snap = rerank(snap, tilt, blocked)
     notes += [f"blocked {s}: {r}" for s, r in list(blocked.items())[:8]]
     if facts:
@@ -385,7 +390,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             # Overrides min_hold_days on purpose: the binary event is the reason to be flat.
             exits[sym] = f"pre-earnings exit ({eid_td} trading days to report)"
         else:
-            verdict = decay_exit(snap, sym, held, ecfg)
+            verdict = decay_exit(rank_snap, sym, held, ecfg)
             if verdict == "defer":
                 # No complete bar today (a trading halt, a feed gap). Absence from the snapshot says nothing
                 # about the ranking, so wait for data instead of selling into the reopening on a gap.
@@ -537,7 +542,11 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                          "notional": q * px, "add_n": int(pos.get("adds") or 0) + 1})
     return {"exits": exits, "entries": entries, "adds": adds, "trims": trims, "analyst_out": analyst_out,
             "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
-            "regime": regime_status, "regime_label": regime_label, "shadow": shadow_rows}
+            "regime": regime_status, "regime_label": regime_label, "shadow": shadow_rows,
+            # Each holding's full-universe rank (None: not ranked today), so a decay exit can be checked later.
+            "holding_ranks": {sym: (int(rank_snap.loc[sym, "rank"]) if sym in rank_snap.index
+                                    and bool(rank_snap.loc[sym, "eligible"]) else None)
+                              for sym, pos in st["positions"].items() if pos.get("filled")}}
 
 
 def record_shadow(today: date, cfg: dict, st: dict, entries: list, rows: list) -> None:
