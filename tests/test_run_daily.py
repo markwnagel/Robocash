@@ -859,3 +859,25 @@ def test_a_day_with_no_candidates_skips_the_red_team_and_says_why(wired, cfg, mo
     assert "red team: nothing to review today" in sent[-1] and "red team unavailable" not in sent[-1]
     skips = [e for e in _telemetry_events() if e.get("event") == "agent_output" and e.get("role") == "red_team"]
     assert skips and skips[-1]["skipped"].startswith("no candidates") and skips[-1]["holdings"] >= 1     # R-57
+
+
+def test_a_holding_is_judged_on_its_full_universe_rank_not_the_fact_checked_pool(wired, cfg, panel, monkeypatch):
+    """2026-10-23 parity review: decay exits used the rank after dropping blocked and un-fact-checked names, so a
+    holding at 47 read as inside 40 (INTC, UMC held a week past the backtest's exit). The backtest uses the full rank."""
+    from desk.signals import compute_panels, snapshot
+    holder, sent = wired
+    base = _patched_cfg(monkeypatch, facts={"candidate_pool": 2}, exits={"signal_decay_rank": 3})
+    snap = snapshot(compute_panels(panel, base["signals"]), -1, base["signals"])
+    el = snap[snap["eligible"]]
+    sym = el.index[5]                                  # full rank 6: beyond 3; behind the 2 pooled names it is 3rd
+    assert int(el.loc[sym, "rank"]) == 6
+    held = (date.today() - timedelta(days=20)).isoformat()
+    px = float(panel["close"][sym].iloc[-1])
+    live = {sym: {"qty": 5, "avg_entry_price": px, "current_price": px, "market_value": 5 * px, "unrealized_plpc": 0.0}}
+    holder["broker"] = FakeBroker(cash=9000.0, positions=live)
+    state_mod.save_state({**state_mod.load_state(), "positions": {
+        sym: {"entry_date": held, "entry_price": px, "qty": 5, "stop": px * 0.8, "target": px * 1.5,
+              "filled": True, "thesis": "t"}}})
+    run(["--no-analyst"])
+    assert sym in holder["broker"].closed
+    assert f"{sym}" in sent[-1] and "signal decay" in sent[-1]

@@ -154,11 +154,70 @@ def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, 
         else:
             pts["live_only"] += v
     out = {k: round(100 * v / capital, 2) for k, v in pts.items()}
+    out.update(matched_split(bt_entries, bt_trades, last_close, live_closed, live_open, pos, capital, tolerance))
     explained = (out["matched_live"] + out["live_only"]) - (out["matched_backtest"] + out["backtest_only_gated"]
                                                            + out["backtest_only_other"])
     out["matched_difference"] = round(out["matched_live"] - out["matched_backtest"], 2)
     out["residual"] = round(gap_pts - explained, 2)
     return out
+
+
+def matched_split(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live_closed: pd.DataFrame,
+                  live_open: list, pos: dict, capital: float, tolerance: int = 5) -> dict:
+    """The same-names gap split into position size and per-trade return (monitor R-59, 2026-10-23), with the
+    pairs that differ most. Each backtest entry is paired with the nearest live entry of that name within
+    `tolerance` trading days. size = (live dollars - backtest dollars) x the backtest's return; return = live
+    dollars x (live return - backtest return); together they are the pair's P&L difference."""
+    live = {}
+    for r in live_closed.to_dict("records"):
+        k = (str(r["symbol"]), str(r["entry_date"])[:10])
+        a = live.setdefault(k, {"pnl": 0.0, "qty": 0.0, "px": float(r.get("entry_price") or 0), "exit": "", "exit_date": ""})
+        a["pnl"] += float(r["pnl"])
+        a["qty"] += float(r.get("qty") or 0)
+        a["exit"], a["exit_date"] = str(r.get("exit_reason") or "")[:24], str(r.get("exit_date") or "")[:10]
+    for s, p in live_open:
+        px = float(p["entry_price"])
+        live[(s, str(p["entry_date"])[:10])] = {"pnl": (float(p.get("last_price") or px) - px) * float(p["qty"]),
+                                                "qty": float(p["qty"]), "px": px, "exit": "open", "exit_date": ""}
+    bt = {}
+    if len(bt_trades):
+        for r in bt_trades.to_dict("records"):
+            k = (r["symbol"], str(r["entry_date"])[:10])
+            a = bt.setdefault(k, {"pnl": 0.0, "exit": "", "exit_date": ""})
+            a["pnl"] += float(r["pnl"])
+            a["exit"], a["exit_date"] = str(r.get("reason") or ""), str(r.get("exit_date") or "")[:10]
+    size = ret = 0.0
+    rows, used = [], set()
+    for e in bt_entries:
+        i = pos.get(pd.Timestamp(e["date"]))
+        if not i:
+            continue
+        sig = i - 1
+        near = [(abs(pos[pd.Timestamp(d)] - sig), (s, d)) for (s, d) in live
+                if s == e["symbol"] and (s, d) not in used and pd.Timestamp(d) in pos and abs(pos[pd.Timestamp(d)] - sig) <= tolerance]
+        if not near:
+            continue
+        k = min(near)[1]
+        used.add(k)
+        lv = live[k]
+        b_usd, l_usd = float(e["price"]) * float(e["qty"]), lv["px"] * lv["qty"]
+        if b_usd <= 0 or l_usd <= 0:
+            continue
+        b = bt.get((e["symbol"], str(pd.Timestamp(e["date"]).date()))) or {
+            "pnl": (float(last_close.get(e["symbol"], e["price"])) - float(e["price"])) * float(e["qty"]), "exit": "open", "exit_date": ""}
+        b_ret, l_ret = b["pnl"] / b_usd, lv["pnl"] / l_usd
+        size += (l_usd - b_usd) * b_ret
+        ret += l_usd * (l_ret - b_ret)
+        rows.append({"symbol": e["symbol"], "diff_pts": round(100 * (lv["pnl"] - b["pnl"]) / capital, 2),
+                     "size_ratio": round(l_usd / b_usd, 2),
+                     "entry_px_diff_pct": round(100 * (lv["px"] / float(e["price"]) - 1), 1),
+                     "live": f"{k[1]} {l_ret:+.1%} {lv['exit']} {lv['exit_date']}".strip(),
+                     "backtest": f"{pd.Timestamp(e['date']).date()} {b_ret:+.1%} {b['exit']} {b['exit_date']}".strip()})
+    rows.sort(key=lambda r: r["diff_pts"])
+    return {"matched_size": round(100 * size / capital, 2), "matched_return": round(100 * ret / capital, 2),
+            "matched_pairs": len(rows),
+            "matched_size_ratio_median": float(pd.Series([r["size_ratio"] for r in rows]).median()) if rows else None,
+            "matched_worst": rows[:5]}
 
 
 def run(cfg: dict, data=None, start: date | None = None, end: date | None = None) -> dict:
@@ -263,6 +322,13 @@ def markdown(res: dict) -> list:
                      f"vs backtest {a['matched_backtest']:+.1f}); backtest-only kept out live {-a['backtest_only_gated']:+.1f}; "
                      f"other backtest-only {-a['backtest_only_other']:+.1f}; live-only {a['live_only']:+.1f}; "
                      f"fills, sizing and idle cash {a['residual']:+.1f}")
+        if a.get("matched_pairs"):
+            lines.append(f"  - same names, split: position size {a['matched_size']:+.1f}, per-trade return "
+                         f"{a['matched_return']:+.1f} ({a['matched_pairs']} pairs; live positions a median "
+                         f"{a['matched_size_ratio_median']:.0%} of the backtest's)")
+            for r in a.get("matched_worst") or []:
+                lines.append(f"    - {r['symbol']} {r['diff_pts']:+.1f}: live {r['live']} vs backtest {r['backtest']}; "
+                             f"size {r['size_ratio']:.0%}, entry price {r['entry_px_diff_pct']:+.1f}%")
     if e.get("backtest_only_gated_live"):
         lines.append(f"  - {e['backtest_only_gated_live']} of the {e['backtest_only']} backtest-only names were kept out "
                      f"live by a gate the replay does not apply (a hard-filter block or an analyst veto)")
