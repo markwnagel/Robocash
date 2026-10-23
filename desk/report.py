@@ -97,16 +97,63 @@ def fingerprint(root: Path) -> dict:
     return {"config": cfg, "code": code}
 
 
+CHANGE_VALUE_MAX = 80     # longer values are summarised as "changed", so one edit can't flood the email
+
+
+def _plain(v):
+    """JSON-plain form, as the saved fingerprint holds it: a YAML date and its saved string compare equal."""
+    return json.loads(json.dumps(v, default=str))
+
+
+def _short(v) -> str:
+    s = str(v)
+    return s if len(s) <= CHANGE_VALUE_MAX else f"{s[:CHANGE_VALUE_MAX - 3]}..."
+
+
+def _value_changes(path: str, a, b) -> list:
+    """What changed inside one setting: nested keys, and list items matched by their 'name'."""
+    if a == b:
+        return []
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = []
+        for k in sorted(set(a) | set(b), key=str):
+            if k not in a:
+                out.append(f"{path}.{k}: added")
+            elif k not in b:
+                out.append(f"{path}.{k}: removed")
+            else:
+                out += _value_changes(f"{path}.{k}", a[k], b[k])
+        return out
+    named = lambda xs: isinstance(xs, list) and all(isinstance(x, dict) and "name" in x for x in xs)
+    if named(a) and named(b):
+        ia, ib = {x["name"]: x for x in a}, {x["name"]: x for x in b}
+        out = []
+        for n in list(ia) + [n for n in ib if n not in ia]:
+            if n not in ib:
+                out.append(f"{path} {n}: removed")
+            elif n not in ia:
+                out.append(f"{path} {n}: added")
+            else:
+                out += _value_changes(f"{path} {n}", ia[n], ib[n])
+        return out
+    if len(str(a)) > CHANGE_VALUE_MAX or len(str(b)) > CHANGE_VALUE_MAX:
+        return [f"{path}: changed"]
+    return [f"{path}: {a} -> {b}"]
+
+
 def diff_fingerprint(old: dict, new: dict) -> list:
     """Human-readable lines. Config shows old -> new; code only says a file changed."""
     if not old:
         return []
     lines = []
-    oc, nc = old.get("config", {}), new.get("config", {})
+    oc, nc = _plain(old.get("config", {})), _plain(new.get("config", {}))
     for k in sorted(set(oc) | set(nc)):
-        a, b = oc.get(k, "<unset>"), nc.get(k, "<removed>")
-        if a != b:
-            lines.append(f"setting {k}: {a} -> {b}")
+        if k not in oc:
+            lines.append(f"setting {k}: <unset> -> {_short(nc[k])}")
+        elif k not in nc:
+            lines.append(f"setting {k}: {_short(oc[k])} -> <removed>")
+        else:
+            lines += [f"setting {ln}" for ln in _value_changes(k, oc[k], nc[k])]
     oh, nh = old.get("code", {}), new.get("code", {})
     for k in sorted(set(oh) | set(nh)):
         if k not in oh:

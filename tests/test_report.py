@@ -61,6 +61,23 @@ def test_diff_fingerprint_reports_settings_and_code():
     assert diff_fingerprint({}, new) == []                   # first ever run reports nothing
 
 
+def test_diff_fingerprint_says_only_what_changed_inside_a_setting():
+    agents = [{"name": "red-team", "purpose": "Bear case per candidate and holding. " * 3, "slos": {"max_turns": 6}},
+              {"name": "analyst", "purpose": "Veto-only review.", "slos": {"max_turns": 6}}]
+    edited = [dict(agents[1]), {**agents[0], "purpose": "Bear case per buy candidate only. " * 3}]   # reordered too
+    old = {"config": {"monitor.agents": agents, "release.since": "2026-10-16"}}          # as saved: a string
+    new = {"config": {"monitor.agents": edited, "release.since": date(2026, 10, 16)}}    # as YAML reads it
+    assert diff_fingerprint(old, new) == ["setting monitor.agents red-team.purpose: changed"]
+    edited[1]["slos"] = {"max_turns": 4}
+    edited.append({"name": "new-agent"})
+    lines = diff_fingerprint(old, new)
+    assert "setting monitor.agents red-team.slos.max_turns: 6 -> 4" in lines
+    assert "setting monitor.agents new-agent: added" in lines
+    assert all(len(ln) < 160 for ln in lines)
+    big = {"config": {"x.y": "a" * 500}}
+    assert diff_fingerprint({"config": {}}, big) == ["setting x.y: <unset> -> " + "a" * 77 + "..."]
+
+
 def test_movers_falls_back_when_nothing_moved_much():
     quiet = [{"symbol": "A", "day_pct": 0.001}, {"symbol": "B", "day_pct": -0.004}, {"symbol": "C", "day_pct": 0.002}]
     assert len(movers(quiet)["notable"]) == 2
