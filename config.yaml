@@ -243,7 +243,9 @@ shadow:                        # desk/shadow.py: every veto, block and half size
 
 parity:                        # desk/parity.py: the backtest replayed over the live period, in the monitor's report
   enabled: true
-  equity_gap_alarm_pts: 5      # SEV2 when live and the replay differ by more than this many percentage points.
+  equity_gap_alarm_pts: 5      # SEV2 when live and the replay differ by more than this many percentage points
+                               # since the current release began (the full-window gap is reported, not alarmed: it
+                               # mostly predates v2.0 and set off the model review every day, 2026-10-20..22).
                                # First run 2026-10-17 (09-12..10-16): live -6.4%, backtest -2.5%, SPY -0.1%; cash
                                # 50% vs 22%; 22 entries matched, 6 backtest-only (3 were the dilution block), 10 live-only
 
@@ -270,6 +272,14 @@ monitor:                       # agent reliability monitor (monitor.py): runs we
                                # other days write a rules-only report (hard alarms still run and escalate). Was daily:
                                # $0.63/day, 37% of API spend, 91% of findings SEV3/4 (engineering review 2026-10-17).
   prompt_file: agent-monitor-prompt.md   # its Configuration block is filled from this section at run time
+  owner_decisions:             # passed to the model review: deliberate choices it should not flag or try to reverse
+    - "2026-10-17: a dilutive filing (S-1, 8-K item 3.02) is a flag for the analyst, not a hard block (facts.offering_block false, backtest 2026-10-17). The parity replay follows the current rules, so names the v1 block kept out appear as gated backtest-only entries by design; that is not a replay defect."
+    - "2026-10-17: the red team reviews buy candidates only (analyst.red_team_scope, cost cut); the analyst covers holdings."
+    - "2026-10-17: REDUCE is retired (analyst.reduce_factor 1.0)."
+    - "2026-10-17: the headline classifier runs on claude-sonnet-5 (cost cut)."
+    - "2026-10-17: the cash sweep is not built live; the owner revisits it on 2026-11-06."
+    - "2026-10-17: the model review runs Fridays and on hard-alarm days; other days are rules-only."
+    - "2026-10-23: the parity alarm judges the gap since the current release; the full-window gap is context."
   window_hours: 24             # first run only; afterwards the window is "since the previous monitor run"
   baseline_days: 7
   agents:                      # SLOs are set only where a real contract exists; the rest is baseline-only

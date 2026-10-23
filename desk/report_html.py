@@ -291,6 +291,10 @@ def build_html(ctx: dict) -> str:
                      + _cell(f'<b>{escape(f["id"])}</b> {escape(f["title"])}'
                              + (f' <span style="color:{MUTED};">({escape(f["trend"])})</span>' if f.get("trend") else ""))
                      + "</tr>")
+        if h.get("parked"):
+            rows += ("<tr>" + _cell("", width="52px")
+                     + _cell(f'+ {h["parked"]} parked (no new evidence for 3+ reviews; listed in the full report)', muted=True)
+                     + "</tr>")
         for r in h.get("recommendations", [])[:5]:
             rows += ("<tr>" + _cell(f'<span style="color:{MUTED};font-weight:600;">{escape(r["priority"])}</span>', width="52px")
                      + _cell(f'{escape(r["id"])} {escape(r["title"])}', muted=True) + "</tr>")

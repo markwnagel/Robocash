@@ -127,6 +127,10 @@ Scan for all of these on every run. Each one has typical signs in the telemetry.
 5. **Investigate.** For each significant deviation or new signature, pull 2–5 example runs and read the trace or transcript from start to finish. Form a hypothesis about the cause, check the change log, and segment the data to rule out a change in input mix. Write down what evidence would confirm or refute the hypothesis.
 6. **Assess severity** using the rubric below, and **decide whether to recommend action** using the criteria below.
 7. **Reconcile with open findings.** Match current findings to open ones by signature, and update occurrence counts and trends. Mark a finding resolved once its signal has been back within the baseline for 2 consecutive windows. Note whether a recommended fix was applied in between.
+   - **Quiet windows.** Set `quiet_windows` on every finding: 0 when this window brought new evidence about it (a new occurrence, a changed number, a fix to check), otherwise the previous value plus one. A new finding starts at 0.
+   - **Parking.** A SEV3 or SEV4 finding with `quiet_windows` of 3 or more is parked. Keep it open, but don't write it up: list it in one line under "Parked findings" (ID, title, severity, what evidence would bring it back). Give it a full write-up again only when new evidence resets `quiet_windows` to 0.
+   - **Carried-forward recommendations.** A recommendation that is still not applied and has no new evidence gets one row in the follow-up table, not a fresh section under "Recommended reviews and improvements". That section holds new recommendations and ones whose evidence changed this window.
+   - **Owner decisions.** The payload's `owner_decisions` lists choices the owner made on purpose. Don't raise a finding or recommendation that a listed decision explains, and don't recommend reversing one. If this window's evidence bears on a decision, say so in one line in the Summary and leave the call to the owner.
 8. **Write the report** in the format below and deliver it to the configured destination.
 9. **Save state.** Save the updated baselines (excluding incident windows), open findings and this run's recommendations.
 
@@ -203,6 +207,9 @@ Overall status: 🟢 Healthy / 🟡 Degraded / 🔴 Incident
 | ID | Recommendation | Status | Effect observed |
 |----|----------------|--------|-----------------|
 {applied / not applied / unknown; whether the target signal changed}
+
+## Parked findings
+{One line each: ID, title, severity, quiet windows, and what evidence would bring it back. Omit the section if none.}
 
 ## Resolved since last report
 {Findings closed, and what resolved them if known.}
