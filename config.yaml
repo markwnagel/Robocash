@@ -49,7 +49,10 @@ signals:
   vol_days: 20
   weights:
     momentum: 0.6
-    short: 0.2
+    short: 0.2              # 2026-10-24 audit proposal (entries after a +20% 20-day move averaged -6.9% vs -3.7%,
+                            # n=10): short 0.15 and 0.10, the rest to low_vol, point-in-time x4 starts
+                            # (scripts/check_audit_1024.py): worse on return and on 6m excess vs SPY in 0/4 starts
+                            # in BOTH windows (2023-26 6m excess -6.4 / -4.2 vs +3.7pt). Kept 0.2.
     low_vol: 0.2
   max_atr_pct: 0.08       # skip names whose 14-day ATR exceeds 8% of price
 
@@ -87,7 +90,11 @@ portfolio:
                               # 2 adds on a 2xATR trail = +115% vs +247% base; adds got shaken out on the same
                               # pullbacks as the trail. OFF.
   pyramid_trigger_r: 1.0      # add when price >= last entry + this many initial-risk units
-  correlation_days: 60
+  correlation_days: 60         # 120 tested 2026-10-24 (audit proposal: three refiners held together), point-in-time
+                               # x4: 2023-26 better in 4/4 (6m excess +4.9 vs +3.7pt, p10 no worse 4/4, DD no worse
+                               # 3/4); 2018-26 better in only 2/4 (-4.0 vs -4.3pt, DD no worse 2/4), invested and
+                               # trades unchanged. Fails the owner's 3/4-in-both-windows bar. Kept 60; recheck in
+                               # the next re-baseline rather than re-running it alone.
   correlation_threshold: 0.75  # 0.70 and 0.65 tested 2026-10-03 (audit proposal; state/robustness/2026-10-03-audit):
                                # frozen 800 x6 starts: return +8-10pt median, drawdown unchanged. Point-in-time
                                # 2023-26 x4: return worse (0.70 in 3/4, 0.65 in 4/4); 2018-26 x4: mixed. Kept 0.75
