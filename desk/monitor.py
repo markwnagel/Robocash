@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 
 import yaml
 
-from .telemetry import is_production, signature
+from .telemetry import API_ACCESS as telemetry_API_ACCESS, is_production, signature
 
 from .schedule import expected_runs, match_runs, schedule_slots  # noqa: F401  (shared with the jobs)
 
@@ -266,15 +266,15 @@ def coverage_alarms(runs: dict, trading_days: set | None) -> list:
 # An error that no retry fixes: the account cannot call the API. On 2026-10-17 the spend limit was reached and
 # every role failed with "You have reached your specified API usage limits" - the desk would have bought nothing
 # for two weeks (the analyst fails closed), and this monitor's own model call failed too. Nothing alarmed.
-API_ACCESS = re.compile(r"usage limit|credit balance|billing|authentication|invalid x-api-key|permission_error|"
-                        r"Error code: 40[13]", re.I)
+API_ACCESS = telemetry_API_ACCESS
 
 
 def api_access_alarms(events: list) -> list:
     """One SEV1 per day on which any role was refused by the API for access, billing or limit reasons."""
     by_day: dict = {}
     for e in events or []:
-        if e.get("event") == "llm_call" and e.get("outcome") == "error" and API_ACCESS.search(str(e.get("error") or "")):
+        if e.get("event") == "llm_call" and (e.get("outcome") == "api_access" or (
+                e.get("outcome") == "error" and API_ACCESS.search(str(e.get("error") or "")))):
             by_day.setdefault(str(e["ts"])[:10], []).append(e)
     return [{"key": f"api-access-{d}", "severity": "SEV1", "title": "Anthropic API refused requests (access or spend limit)",
              "detail": f"{len(es)} call(s) on {d} ({', '.join(sorted({str(x.get('role')) for x in es}))}): "
@@ -506,12 +506,16 @@ def fallback_report(payload: dict, reason: str, scheduled: bool = False) -> str:
     return "\n".join(lines)
 
 
-def summary_for_email(result: dict, report_rel: str, analysis: str) -> dict:
-    """What the daily email shows: status, findings and recommendations, and where the full report is."""
+def summary_for_email(result: dict, report_rel: str, analysis: str, reviewed_on: str | None = None) -> dict:
+    """What the daily email shows: status, findings and recommendations, and where the full report is.
+    quiet_windows rides along so the email can leave parked findings out (it was dropped here, so nothing ever
+    parked, 2026-10-29); reviewed_on is the model review the findings come from, so a rules-only day's email does
+    not present last Friday's numbers as today's."""
     return {
         "date": date.today().isoformat(), "status": result.get("status", "unknown"), "analysis": analysis,
-        "summary": result.get("summary", ""), "report": report_rel,
-        "findings": [{"id": f["id"], "severity": f["severity"], "title": f["title"], "trend": f.get("trend", "")}
+        "summary": result.get("summary", ""), "report": report_rel, "reviewed_on": reviewed_on,
+        "findings": [{"id": f["id"], "severity": f["severity"], "title": f["title"], "trend": f.get("trend", ""),
+                      "quiet_windows": f.get("quiet_windows")}
                      for f in sorted(result.get("findings", []), key=lambda f: f["severity"])],
         "recommendations": [{"id": r["id"], "priority": r["priority"], "title": r["title"]}
                             for r in result.get("recommendations", []) if r.get("status") == "open"],

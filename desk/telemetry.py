@@ -351,9 +351,18 @@ def cost_usd(model: str | None, u: dict) -> float | None:
                   + u["cache_read_tokens"] * inp * CACHE_READ_X + u["output_tokens"] * out) / 1e6, 6)
 
 
+# Errors no retry fixes: the account cannot call the API (spend limit, billing, key). Named apart from a plain
+# "error" so a usage-limit refusal reads as what it is in every role's outcomes (monitor R-48, 2026-10-18).
+API_ACCESS = re.compile(r"usage limit|credit balance|billing|authentication|invalid x-api-key|permission_error|"
+                        r"Error code: 40[13]", re.I)
+
+
 def llm_call(role: str, model: str, started: float, responses: list | None = None, outcome: str = "ok",
              error: str | None = None, **fields) -> None:
-    """outcome: ok | refusal | parse_error | paused_out | error. `started` is time.monotonic() at the call."""
+    """outcome: ok | refusal | parse_error | paused_out | truncated | error | api_access (an error caused by account
+    access, billing or the spend limit). `started` is time.monotonic() at the call."""
+    if outcome == "error" and error and API_ACCESS.search(error):
+        outcome = "api_access"
     responses = [r for r in (responses or []) if r is not None]
     u = usage_of(responses)
     last = responses[-1] if responses else None
