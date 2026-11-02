@@ -91,6 +91,7 @@ def main():
     ap.add_argument("--frictions", type=int, default=0,
                     help="N paired seeds with the live frictions (half-size 42%%, REMOVE 10%%); median per start")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--keep-curves", action="store_true", help="save equity curves (curves.pkl) with SPY and SPMO")
     ap.add_argument("--tag", default="quant-review-2026-11-01")
     args = ap.parse_args()
     cfg = load_config()
@@ -150,6 +151,9 @@ def main():
                      "sharpe": st["sharpe"], **R.excess_vs_spy(r["equity"], spy),
                      "spmo_6m_median": vs_spmo["excess_6m_median"], "spmo_cagr_excess": vs_spmo["cagr_excess"],
                      "invested": float(1 - (r["cash"] / r["equity"]).mean())})
+    if args.keep_curves:
+        pd.to_pickle({"curves": {n: r["equity"] for n, r in res.items()}, "spy": spy, "spmo": spmo},
+                     out / "curves.pkl")
     df = pd.DataFrame(rows); df.to_csv(out / "runs.csv", index=False)
     df = df.groupby(["variant", "window", "offset"], sort=False).median(numeric_only=True).reset_index()
     print(f"{len(jobs)} runs in {time.time() - t0:.0f}s -> {out}")
