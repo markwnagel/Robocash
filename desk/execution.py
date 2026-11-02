@@ -58,6 +58,17 @@ class Broker:
         cal = self.t.get_calendar(GetCalendarRequest(start=day, end=day))
         return any(c.date == day for c in cal)
 
+    def nth_trading_day_after(self, day: date, n: int) -> date:
+        """The n-th session after `day` on the exchange calendar (holidays skipped)."""
+        from datetime import timedelta
+        from alpaca.trading.requests import GetCalendarRequest
+        cal = self.t.get_calendar(GetCalendarRequest(start=day + timedelta(days=1),
+                                                    end=day + timedelta(days=2 * n + 14)))
+        days = sorted(c.date for c in cal if c.date > day)
+        if len(days) < n:
+            raise ValueError(f"calendar returned {len(days)} sessions after {day}, need {n}")
+        return days[n - 1]
+
     def market_open(self) -> bool:
         """Whether the regular session is open right now. Unknown reads as open: the callers use it to be
         more careful (day-trade guard, partial-bar warning), never less."""

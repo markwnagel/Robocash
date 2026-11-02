@@ -83,6 +83,14 @@ portfolio:
     # drawdown is deeper in every start. Misses the >=3/4 return bar in 2023-26. A 5% band was no better.
     # Owner's decision 2026-10-17: not built live. reduce_factor 1.0 and offering_block false (both from 10-19)
     # should cut idle cash on their own. Revisit ~2026-11-06: if live cash still averages over ~25%, build it.
+    # 2026-11-01 at live cash levels (scripts/check_cash_sweep_live.py; live frictions: half-size 42%, REMOVE 10%;
+    # 5 paired seeds x 4 starts per window, median per start). Idle cash ~32-37%, near live's 35-45%:
+    #   2018-26 CAGR 4.5% vs 2.4% (better 4/4), 6m excess vs SPY -4.5 vs -5.7pt (better 4/4), p10 no worse 4/4,
+    #           max DD -31.6% vs -31.6% (better 1/4); paired seeds better 16/20
+    #   2023-26 CAGR 17.1% vs 14.3% (better 4/4), 6m excess +2.8 vs +0.7pt (better 4/4), p10 no worse 4/4,
+    #           max DD -22.8% vs -17.9% (better 0/4); paired seeds better 18/20
+    # Clears the owner's bar in both windows at live cash, which the 10-17 run did not. Still exposure, not
+    # edge (invested 63-68% -> 77-83%), and 2023-26 drawdown ~5pt deeper. Decision for 2026-11-06.
   max_new_entries_per_day: 4  # spreads entry timing. Backtested 2026-09-12 (3y): unlimited = +104%/DD -27.7%
                               # with six hard-floor hits vs +247%/-20.5% at 4/day - batch entries share one
                               # day's gap risk and trip the kill switch together. Keep.
@@ -147,6 +155,10 @@ exits:
 risk:
   max_drawdown_pct: 0.15     # from the episode high-water mark (reset by --resume); liquidate + halt
   max_cumulative_drawdown_pct: 0.25  # from the ALL-TIME high; liquidate + halt until --resume --reset-hwm
+  halt_cooldown_days: 20     # after the 15% switch fires, stay flat this many sessions, then resume on our own from a
+                             # re-based high-water mark - what the backtest assumes (backtest.py --halt-cooldown-days,
+                             # default 20; it fired 3 times in 2023-26). 0 = wait for a manual --resume. --resume still
+                             # restarts sooner. The 25% hard floor never clears itself. (2026-11-01, audit 10-31)
   daily_loss_halt_pct: 0.05  # no new entries on a day the account is down this much
   max_daytrades_per_5d: 2
 
@@ -257,11 +269,12 @@ parity:                        # desk/parity.py: the backtest replayed over the 
                                # 50% vs 22%; 22 entries matched, 6 backtest-only (3 were the dilution block), 10 live-only
 
 budget:
-  monthly_api_usd: 40          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). Keep the
-                               # Anthropic Console limit at or above this: at the Console limit every role fails and
-                               # the desk buys nothing (2026-10-17). ~$35/mo before the 2026-10-17 cuts, ~4%/yr of
-                               # the $10k account; target <= ~1.5%/yr until the agents show value. October already
-                               # had ~$22 before the cuts; lower this to ~20 from November once telemetry shows them.
+  monthly_api_usd: 25          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). An alarm,
+                               # not a cap. Keep the Anthropic Console limit at or above this: at the Console limit every
+                               # role fails and the desk buys nothing (2026-10-17). ~$35/mo before the 2026-10-17 cuts.
+                               # 2026-11-01: 40 -> 25. Post-cut telemetry ~$0.64/trading day + the weekly audit = ~$16-18/mo,
+                               # so SEV2 ($20) sits above a normal month; 20 would have put SEV2 inside it (audit 10-31).
+                               # Target <= ~1.5%/yr of the account until the agents show value; recheck in December.
 
 report:
   to: mark@markwnagel.com   # daily activity email, 14:00 local (after the 13:40 desk run)

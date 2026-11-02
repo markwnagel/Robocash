@@ -508,6 +508,16 @@ def test_unprotected_holdings_halts_and_failed_emails_are_hard_alarms():
     assert keys == {"desk-unprotected-2026-09-24", "desk-halted-2026-09-25", "report-email-r1"}
 
 
+def test_the_halt_alarm_names_the_automatic_resume_date():
+    ev = {"event": "run_end", "job": "desk", "run_id": "d2", "ts": "2026-09-25T20:50:00+00:00", "status": "halted",
+          "reason": "drawdown 15.2% >= 15% limit", "hard": False, "halt_date": "2026-09-25",
+          "resume_on": "2026-10-23", "open_positions": 0}
+    detail = M.hard_alarms({}, {}, None, [ev])[0]["detail"]
+    assert "Nothing trades until 2026-10-23 (automatic" in detail
+    detail = M.hard_alarms({}, {}, None, [{**ev, "hard": True, "resume_on": None}])[0]["detail"]
+    assert "Nothing trades until --resume --reset-hwm" in detail
+
+
 def test_a_report_that_crashed_or_never_ran_is_a_hard_alarm():
     t = datetime(2026, 9, 23, 14, 0, tzinfo=PT)
     alarms = M.hard_alarms({"report": {"missed": [t]}},

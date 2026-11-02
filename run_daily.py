@@ -38,7 +38,7 @@ from desk.notify import send
 from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries, shrink_qty, size_position,
                             trail_stop)
 from desk.regime import current_regime, regime_params, vix_series
-from desk.risk import can_exit_today, enforce_entry_limits, evaluate
+from desk.risk import auto_resume_due, can_exit_today, clear_halt, enforce_entry_limits, evaluate, resume_date
 from desk.signals import compute_panels, rerank, snapshot
 from desk import schedule, shadow, telemetry
 from desk.state import load_state, save_state, write_brief
@@ -76,10 +76,7 @@ def main() -> None:
             log.error(msg)
             publish(msg, today, cfg, args.dry_run, brief=False)
             return
-        st.update(halted=False, hard_halted=False, halt_reason="", halt_date="")
-        st["high_water_mark"] = 0.0  # episode HWM re-baselines so the same drawdown doesn't re-trip immediately
-        if args.reset_hwm:
-            st["all_time_hwm"] = 0.0
+        clear_halt(st, reset_hwm=args.reset_hwm)
         if not args.dry_run:
             save_state(st)
         log.info("halt cleared%s", " (all-time high reset)" if args.reset_hwm else "")
@@ -100,8 +97,23 @@ def main() -> None:
         publish(f"[{mode}] account is blocked by the broker; no action taken", today, cfg, args.dry_run, brief=False)
         telemetry.note(status="blocked", reason="account blocked by broker")
         return
+    resumed = ""
+    if st.get("halted") and not st.get("hard_halted"):
+        if not cooldown_days(cfg):
+            st["resume_on"] = ""             # cooldown turned off: back to a manual --resume
+        elif not st.get("resume_on"):
+            # A halt from before resume dates existed: give it one now.
+            st["resume_on"] = resume_date(date.fromisoformat(st["halt_date"]), cooldown_days(cfg),
+                                          broker.nth_trading_day_after).isoformat()
+    if auto_resume_due(st, today):
+        resumed = (f"KILL SWITCH CLEARED: halted {st['halt_date']} ({st['halt_reason']}); resumed after "
+                   f"{cooldown_days(cfg)} sessions as the backtest assumes. Drawdown is measured from today's equity.")
+        log.info(resumed)
+        clear_halt(st)
     live = broker.positions()
     notes = sync_positions(st, broker, live, today)
+    if resumed:
+        notes.insert(0, resumed)
     if not args.dry_run:
         # Closes just appended to trades.csv and their removal from state land together: a run that dies
         # later cannot log the same close again tomorrow.
@@ -197,12 +209,13 @@ def run_halted(args, cfg, today, st, broker, live, acct, decision, notes, mode) 
             flat = f"LIQUIDATION FAILED ({type(e).__name__}: {e}) - retried next run; check the broker now."
         for sym, pos in st["positions"].items():
             pos["pending_exit_reason"] = "KILL SWITCH: " + decision.halt_reason
-        st.update(halted=True, hard_halted=decision.hard, halt_reason=decision.halt_reason, halt_date=today.isoformat())
-        how = "--resume --reset-hwm" if decision.hard else "--resume"
-        headline = f"KILL SWITCH FIRED - {decision.halt_reason}. {flat} Run with {how} to re-enable."
+        st.update(halted=True, hard_halted=decision.hard, halt_reason=decision.halt_reason, halt_date=today.isoformat(),
+                  resume_on="")
+        if not decision.hard and cooldown_days(cfg):
+            st["resume_on"] = resume_date(today, cooldown_days(cfg), broker.nth_trading_day_after).isoformat()
+        headline = f"KILL SWITCH FIRED - {decision.halt_reason}. {flat} {resume_text(st)}"
     else:
-        how = "--resume --reset-hwm" if st.get("hard_halted") else "--resume"
-        headline = f"HALTED since {st['halt_date']} ({st['halt_reason']}). No trading. Run with {how} to re-enable."
+        headline = f"HALTED since {st['halt_date']} ({st['halt_reason']}). No trading. {resume_text(st)}"
         # Anything still held survived the liquidation, and liquidate_all cancelled its stops first, so
         # it is open with no protection. Re-send the close every halted run until it is gone.
         resent = []
@@ -224,8 +237,22 @@ def run_halted(args, cfg, today, st, broker, live, acct, decision, notes, mode) 
         save_state(st)
     publish(render_brief(mode, today, acct, decision, st, {}, [], notes, headline, cfg), today, cfg, args.dry_run)
     telemetry.note(status="halted", reason=st.get("halt_reason"), hard=bool(st.get("hard_halted")),
-                   halt_date=st.get("halt_date"), open_positions=len(live), notes=len(notes),
+                   halt_date=st.get("halt_date"), resume_on=st.get("resume_on") or None, open_positions=len(live),
+                   notes=len(notes),
                    unprotected=sum(NO_STOP in n for n in notes))
+
+
+def cooldown_days(cfg: dict) -> int:
+    return int(cfg["risk"].get("halt_cooldown_days") or 0)
+
+
+def resume_text(st: dict) -> str:
+    if st.get("hard_halted"):
+        return "Run with --resume --reset-hwm to re-enable (the hard floor never clears itself)."
+    if st.get("resume_on"):
+        return (f"Trading resumes automatically on {st['resume_on']}, as the backtest assumes; "
+                f"--resume restarts sooner.")
+    return "Run with --resume to re-enable."
 
 
 def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, keys, notes, session_open) -> dict:

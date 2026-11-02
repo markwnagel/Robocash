@@ -81,7 +81,11 @@ DEFAULT_HALT_COOLDOWN = 20
 
 def strategy_fingerprint(cfg: dict, slippage_bps: float, halt_cooldown: int) -> dict:
     """Everything that changes a backtest's result, and nothing that does not (model names, email)."""
-    return {**{k: cfg[k] for k in STRATEGY_SECTIONS},
+    sections = {k: cfg[k] for k in STRATEGY_SECTIONS}
+    # The live halt cooldown is the backtest's halt_cooldown, already below; hashing it twice would give
+    # today's config a new id without changing a single backtest result.
+    sections["risk"] = {k: v for k, v in sections["risk"].items() if k != "halt_cooldown_days"}
+    return {**sections,
             "facts": {k: cfg["facts"].get(k) for k in BACKTEST_FACTS},
             "slippage_bps": slippage_bps, "halt_cooldown": halt_cooldown}
 

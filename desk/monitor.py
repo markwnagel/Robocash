@@ -349,9 +349,11 @@ def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list |
             if e.get("status") == "halted":
                 alarms.append({"key": f"desk-halted-{e.get('halt_date') or str(e['ts'])[:10]}", "severity": "SEV1",
                                "title": "Kill switch halted trading",
-                               "detail": f"{e.get('reason')}. Nothing trades until --resume"
-                                         f"{' --reset-hwm' if e.get('hard') else ''}; "
-                                         f"{e.get('open_positions', 0)} position(s) still open at that run."})
+                               "detail": f"{e.get('reason')}. Nothing trades until "
+                                         + (f"{e['resume_on']} (automatic, as the backtest assumes) or --resume; "
+                                            if e.get("resume_on") and not e.get("hard") else
+                                            f"--resume{' --reset-hwm' if e.get('hard') else ''}; ")
+                                         + f"{e.get('open_positions', 0)} position(s) still open at that run."})
         elif e.get("job") == "audit" and e.get("status") == "degraded":
             alarms.append({"key": f"audit-degraded-{e.get('run_id')}", "severity": "SEV2",
                            "title": "Weekly audit produced no usable audit",
