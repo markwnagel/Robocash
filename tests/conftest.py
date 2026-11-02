@@ -7,12 +7,43 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from desk.config import load_config  # noqa: E402
+from desk import config as config_mod  # noqa: E402
+from desk.config import load_config as _load_live_config  # noqa: E402
+
+# The suite tests mechanics (brackets, sizing, halts, exits) on a fixed strategy: the v2.0 geometry these tests were
+# written for. A strategy release changes config.yaml, not what the mechanics must do, so it should not rewrite
+# half the suite. Tests of the live strategy itself use the live_cfg fixture.
+MECHANICS_BASELINE = {
+    "signals": {"momentum_lookback_days": 126},
+    "portfolio": {"target_positions": 12, "max_positions": 15, "max_position_pct": 0.10},
+    "exits": {"stop_atr_multiple": 2.0, "take_profit_r_multiple": 3.0, "min_hold_days": 15, "max_hold_days": 60,
+              "signal_decay_rank": 40},
+}
+
+
+def mechanics_config(*a, **k):
+    cfg = _load_live_config(*a, **k)
+    for section, values in MECHANICS_BASELINE.items():
+        cfg[section].update(values)
+    return cfg
+
+
+@pytest.fixture(autouse=True)
+def _mechanics_baseline(monkeypatch):
+    import audit, backtest, monitor, report_daily, robustness, run_daily
+    for mod in (config_mod, audit, backtest, monitor, report_daily, robustness, run_daily):
+        monkeypatch.setattr(mod, "load_config", mechanics_config)
 
 
 @pytest.fixture
 def cfg():
-    return load_config()
+    return mechanics_config()
+
+
+@pytest.fixture
+def live_cfg():
+    """config.yaml as the desk runs it today."""
+    return _load_live_config()
 
 
 @pytest.fixture

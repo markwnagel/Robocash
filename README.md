@@ -1,7 +1,7 @@
 # Robocash
 
 Systematic, long-only, no-leverage US equity strategy for a small Alpaca account. Runs once a day after the close,
-holds 8-15 names for 15-60 days with broker-side bracket orders, and has a hard-coded drawdown kill switch.
+holds up to 20 names for 21-126 days (v2.1) with broker-side stops, and has a hard-coded drawdown kill switch.
 An intelligence layer turns SEC filings, news, options, and social data into structured facts; Claude plays a
 red team and a veto-only analyst on top of that; a weekly auditor attacks the process itself.
 
@@ -21,7 +21,7 @@ run_daily.py (16:45 ET, weekdays)
                     (--resume re-baselines the episode HWM, so each episode is capped at 15%; the
                     all-time floor is the cumulative backstop and needs an explicit acknowledgement)
   3. universe       NYSE/Nasdaq common stock, price >= $5, 20d avg dollar volume >= $20M, top 800 (cached weekly)
-  4. signals        6-1 month momentum (60%), 20-day return (20%), low realized vol (20%);
+  4. signals        12-1 month momentum (60%), 20-day return (20%), low realized vol (20%);
                     must be above 50-day MA, positive momentum, 14-day ATR <= 8% of price
   5. REGIME GATE    SPY below its 200-day MA or VIX > 30 -> target position count halved (code, from Alpaca + FRED)
                     If the SPY/regime data fails, the halved (risk-off) target applies until it is back;
@@ -41,7 +41,8 @@ run_daily.py (16:45 ET, weekdays)
                     HALF SIZE: implied/realized vol >= 1.5 (floored at 1 share).
                     ANALYST FLAG, not a block: shelf registrations - a 424B takedown may be debt, and an
                       S-3ASR is routine for a large issuer, so the analyst reads the filing instead.
-  7. exits          held >= 60 days -> close; held >= 15 days and rank fell past 40 -> close
+  7. exits          held >= 126 days -> close; held >= 21 days and rank fell past 80 -> close;
+                    broker-side stop 4x ATR below the fill, no take-profit leg (v2.1; v2.0 was 2x ATR + 3R)
                     TRAILING STOP (exits.trail_atr_multiple > 0): each evening the stop is raised to
                       (highest close since entry - k x ATR), never lowered, and the broker-side stop is
                       replaced. Pair with take_profit_r_multiple: 0 so winners are not capped at 3R.
@@ -54,7 +55,7 @@ run_daily.py (16:45 ET, weekdays)
                     candidate correlated > 0.75 with more than one holding (zero tolerance was backtested
                     and lost on both return and drawdown); each position risks 1% of equity
                     with the stop distance setting the share count (`portfolio.sizing: risk_parity`),
-                    capped at 10% of equity. Only fact-checked names are eligible; anything the analyst
+                    capped at 7% of equity, 20 names targeted. Only fact-checked names are eligible; anything the analyst
                     has not reviewed (past its capacity, or given no verdict) is dropped; no entries at all if
                     the last bar is not the latest session.
   9. RED TEAM       Claude writes the strongest bear case per name (trap type + severity) from the fact sheet
@@ -123,6 +124,12 @@ review, counted from the 10-16 close ($9,361) - its first desk run is 2026-10-19
   the cut are v1's picks: they close as `v1.0 (carried)`. Trades closed before the column existed are `v1.0`.
 - The live-vs-backtest section and the weekly audit report the current release on its own, beside the whole history.
 - Risk limits never reset at a release: the kill switch, high-water mark and cumulative floor are continuous.
+
+v2.1 "slow and wide" (quant review 2026-11-01) is counted from the 10-30 close: 12-month momentum, a 4x ATR stop with
+no target, decay rank 80, holds of 21-126 days, 20 names at 7%. It is the first change to clear the owner's bar in
+both windows (under live frictions, and in every start with the SPY sweep); `config.yaml` above `release` has the
+numbers. Positions opened under v2.0 keep their 2x-ATR stops and 3R targets at the broker and their `v2.0` label; the
+v2.1 decay and hold rules (rank 80, 21-126 days) apply to them from the first v2.1 run.
 
 To cut v3: change `release.name` and `release.since` (the last close under the old version), merge, and tag the merge.
 
@@ -270,29 +277,32 @@ Sharpe here is a necessary condition, not a sufficient one.
 **Results** - regenerate with `python scripts/trials_report.py --write-readme` after testing variants:
 
 <!-- trials:start -->
-_Generated from 73 logged runs (latest 2026-10-26 03:10 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `12be6539`, N = 94 trials._
+_Generated from 109 logged runs (latest 2026-11-02 05:29 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `pit`, N = 107 trials._
 
 | Variant | Deflated Sharpe | Return | Max DD | Sharpe | Runs |
 |---|---|---|---|---|---|
-| sizing notional | 0.98 | +127% | -19.4% | 1.60 | 1 |
-| earnings-block-days 0 | 0.97 | +177% | -18.6% | 1.52 | 1 |
-| max-position-pct 0.15, target-positions 8 | 0.97 | +151% | -20.4% | 1.51 | 1 |
-| ladder True | 0.96 | +144% | -18.9% | 1.46 | 1 |
-| risk-per-trade 0.0125 | 0.96 | +181% | -18.6% | 1.47 | 1 |
-| take-profit 0.0, trail-atr 3.0 | 0.94 | +154% | -19.8% | 1.36 | 1 |
-| max-atr-pct 0.12 | 0.94 | +161% | -24.2% | 1.35 | 1 |
-| pyramid-adds 2, take-profit 0.0, trail-atr 2.0 | 0.94 | +143% | -18.0% | 1.32 | 1 |
-| config.yaml as of 2026-09-25 (superseded) | 0.94 | +144% | -19.2% | 1.33 | 3 |
-| **current: config.yaml** | 0.94 | +144% | -19.2% | 1.33 | 3 |
-| corr-threshold 0.65 | 0.93 | +141% | -19.3% | 1.31 | 1 |
-| max-new-per-day 0 | 0.93 | +140% | -18.9% | 1.31 | 1 |
-| take-profit 0.0, trail-atr 2.0 | 0.93 | +134% | -18.5% | 1.27 | 1 |
-| corr-threshold 0.7 | 0.92 | +129% | -19.2% | 1.25 | 1 |
-| target-positions 15 | 0.91 | +131% | -20.1% | 1.23 | 1 |
-| ladder True, off-liquidate True | 0.90 | +96% | -20.2% | 1.19 | 1 |
-| max-corr-peers 0 | 0.87 | +103% | -21.2% | 1.08 | 1 |
-| earnings-exit-days 2 | 0.83 | +87% | -22.9% | 0.99 | 1 |
-| earnings-block-days 21 | 0.82 | +87% | -20.0% | 0.97 | 1 |
+| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.cash-sweep {'enabled': True, 'band_pct': 0.02}, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.89 | +140% | -22.2% | 1.31 | 2 |
+| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.86 | +120% | -18.1% | 1.22 | 2 |
+| portfolio.correlation-days 120 | 0.73 | +70% | -18.7% | 0.92 | 1 |
+| facts.offering-block-backtest False | 0.72 | +68% | -18.7% | 0.91 | 1 |
+| portfolio.cash-sweep {'enabled': False} | 0.72 | +68% | -18.7% | 0.91 | 2 |
+| **current: config.yaml** | 0.72 | +68% | -18.7% | 0.91 | 1 |
+| regime.off-liquidate True | 0.71 | +64% | -16.0% | 0.89 | 1 |
+| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20 | 0.71 | +65% | -20.2% | 0.89 | 1 |
+| portfolio.max-position-pct 0.15, portfolio.risk-per-trade-pct 0.015, portfolio.trim-above-pct 0.2, portfolio.trim-to-pct 0.15 | 0.69 | +68% | -19.8% | 0.86 | 1 |
+| facts.offering-block-backtest True | 0.68 | +62% | -18.9% | 0.84 | 1 |
+| regime.risk-off-scale 1.0 | 0.68 | +62% | -20.1% | 0.84 | 1 |
+| portfolio.cash-sweep {'enabled': True, 'band_pct': 0.02} | 0.61 | +51% | -22.2% | 0.73 | 5 |
+| portfolio.cash-sweep {'enabled': True, 'band_pct': 0.05} | 0.60 | +50% | -21.7% | 0.72 | 2 |
+| risk.max-cumulative-drawdown-pct 0.35, risk.max-drawdown-pct 0.25 | 0.59 | +47% | -25.8% | 0.69 | 1 |
+| portfolio.target-positions 15 | 0.58 | +50% | -20.9% | 0.69 | 1 |
+| portfolio.max-position-pct 0.15, portfolio.risk-per-trade-pct 0.0125, portfolio.trim-above-pct 0.2, portfolio.trim-to-pct 0.15 | 0.58 | +45% | -19.5% | 0.69 | 1 |
+| risk.max-drawdown-pct 0.99 | 0.57 | +43% | -29.2% | 0.67 | 1 |
+| portfolio.target-positions 15, regime.off-liquidate True | 0.56 | +44% | -16.6% | 0.65 | 1 |
+| exits.signal-decay-rank 80 | 0.53 | +39% | -18.3% | 0.61 | 1 |
+| exits.max-hold-days 252, exits.min-hold-days 63, exits.signal-decay-rank 100, exits.stop-atr-multiple 10.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.06, portfolio.max-positions 30, portfolio.sizing notional, portfolio.target-positions 25, portfolio.vol-weighting False, signals.max-atr-pct 0.15, signals.momentum-lookback-days 252, signals.weights {'momentum': 1.0, 'short': 0.0, 'low_vol': 0.0} | 0.53 | +52% | -31.4% | 0.61 | 1 |
+| signals.weights {'momentum': 0.6, 'short': 0.1, 'low_vol': 0.3} | 0.42 | +17% | -15.5% | 0.45 | 1 |
+| signals.weights {'momentum': 0.6, 'short': 0.15, 'low_vol': 0.25} | 0.32 | +11% | -19.3% | 0.29 | 1 |
 <!-- trials:end -->
 
 How to read it (as of 2026-09-24, N = 17; re-read the table above against this):

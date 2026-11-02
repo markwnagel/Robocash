@@ -838,13 +838,13 @@ def render_brief(mode, today, acct, decision, st, exits, entries, notes, headlin
         pnl = last / p["entry_price"] - 1 if p["entry_price"] else 0
         flag = f"  -> EXIT: {exits[sym]}" if sym in exits else (f"  -> {p['pending_exit_reason']}" if p.get("pending_exit_reason") else "")
         stop = f"{p['stop']:.2f}" if p.get("stop") else "NONE"
-        tgt = f"{p['target']:.2f}" if p.get("target") else ("trail" if p.get("stop") else "-")
+        tgt = f"{p['target']:.2f}" if p.get("target") else ("no target" if p.get("stop") else "-")
         adds_s = f" +{p['adds']}" if p.get("adds") else ""
         lines.append(f"  {sym:<6} {p['qty']:>5.0f}{adds_s} @ {p['entry_price']:.2f} -> {last:.2f} ({pnl:+.1%}) day {held}/{ecfg['max_hold_days']} stop {stop} tgt {tgt}{flag}")
     if entries:
         lines.append("Entries staged for next open:")
         for e in entries:
-            tgt = f"{e['target']:.2f}" if e.get("target") else "trail"
+            tgt = f"{e['target']:.2f}" if e.get("target") else "no target"
             lines.append(f"  BUY {e['symbol']:<6} x{e['qty']} lim {e['limit']:.2f} stop {e['stop']:.2f} tgt {tgt} (${e['notional']:,.0f}) - {e['thesis']}")
     elif not headline:
         lines.append("Entries staged: none")

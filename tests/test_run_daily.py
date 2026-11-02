@@ -952,3 +952,23 @@ def test_the_halt_cooldown_does_not_change_the_strategy_id(cfg):
     without = {**cfg, "risk": {k: v for k, v in cfg["risk"].items() if k != "halt_cooldown_days"}}
     assert trials.current_config_id(cfg) == trials.current_config_id(without)
     assert cfg["risk"]["halt_cooldown_days"] == trials.DEFAULT_HALT_COOLDOWN
+
+
+def test_v2_1_stages_slow_wide_brackets_end_to_end(wired, live_cfg, monkeypatch):
+    """The live strategy as config.yaml runs it (v2.1): 12-month momentum, a 4x ATR stop with no take-profit
+    leg, at most 7% of equity per name, room for 20 names, paced at 4 new entries a day."""
+    holder, sent = wired
+    monkeypatch.setattr(run_daily, "load_config", lambda *a, **k: live_cfg)
+    holder["broker"] = FakeBroker()
+    run(["--no-analyst"])
+    b = holder["broker"]
+    ecfg, pcfg = live_cfg["exits"], live_cfg["portfolio"]
+    assert ecfg["take_profit_r_multiple"] == 0 and ecfg["stop_atr_multiple"] == 4.0
+    assert 1 <= len(b.brackets) <= pcfg["max_new_entries_per_day"]
+    for sym, qty, lim, stop, target in b.brackets:
+        assert target is None and stop < lim
+        assert qty * lim <= 10000 * pcfg["max_position_pct"] + lim     # the 7% cap, within one share
+    st = json.loads(state_mod.STATE_FILE.read_text())
+    for sym, p in st["positions"].items():
+        assert p["target"] is None and p["release"] == live_cfg["release"]["name"]
+    assert f"Positions 0/{pcfg['max_positions']}" in sent[-1] or f"/{pcfg['max_positions']}" in sent[-1]
