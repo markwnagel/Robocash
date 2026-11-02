@@ -39,5 +39,5 @@ def test_the_context_survives_a_parity_failure_and_carries_owner_decisions(monke
     cfg = {"parity": {"enabled": True}, "budget": {"monthly_api_usd": 40}, "monitor": {"owner_decisions": ["a"]}}
     c = audit.current_context(cfg, date(2026, 10, 24))
     assert c["parity"] == {"error": "RuntimeError: no bars"} and c["owner_decisions"] == ["a"]
-    assert set(c) == {"changes_since_last_audit", "parity", "api_spend", "owner_decisions"}
+    assert set(c) == {"changes_since_last_audit", "parity", "api_spend", "owner_decisions", "stop_rule"}
     assert "it does not limit or reduce spending" in audit.AUDIT_SYSTEM

@@ -59,7 +59,10 @@ Four inputs keep the audit current; use them before the config comments, which c
 - `api_spend`: month-to-date spend and the recent cost per trading day, by job. budget.monthly_api_usd is the
   monitor's alarm threshold; it does not limit or reduce spending, so lowering it saves nothing.
 - `owner_decisions`: choices the owner made on purpose. Don't propose reversing one; if the evidence bears on it,
-  say so in one sentence."""
+  say so in one sentence.
+- `stop_rule`: the owner's pre-registered test of whether the project is worth running, computed in code: the desk
+  against its benchmark (SPMO) and SPY since the current release. State its status and numbers in the first
+  sentence of the summary. STOP or REVIEW is the most important finding of the week; RUNNING needs one line."""
 
 AUDIT_SCHEMA = {
     "type": "object",
@@ -128,6 +131,27 @@ def api_spend(today: date, cfg: dict, days: int = 5) -> dict:
             "note": "budget.monthly_api_usd sets the monitor's spend alarms; it does not cap or reduce spend"}
 
 
+def stop_rule_status(rule: dict, since_release: dict, today: date) -> dict:
+    """The owner's stop rule (config governance.stop_rule), judged from parity's since-release returns. Pure.
+    STOP on or after decide_on if the desk trails the benchmark by more than stop_trail_pts AND trails SPY;
+    REVIEW on or after warn_on if it trails the benchmark by more than warn_trail_pts; otherwise RUNNING."""
+    if not rule:
+        return {}
+    out = {"rule": rule}
+    sr = since_release or {}
+    if sr.get("benchmark_return") is None or sr.get("live_return") is None:
+        return {**out, "status": "UNKNOWN", "why": "no since-release returns (parity or benchmark bars unavailable)"}
+    vs_b = round(100 * (sr["live_return"] - sr["benchmark_return"]), 1)
+    vs_spy = round(100 * (sr["live_return"] - sr["spy_return"]), 1)
+    out.update(since=sr.get("from"), desk_vs_benchmark_pts=vs_b, desk_vs_spy_pts=vs_spy)
+    decide, warn = date.fromisoformat(str(rule["decide_on"])), date.fromisoformat(str(rule["warn_on"]))
+    if today >= decide and vs_b < -float(rule["stop_trail_pts"]) and vs_spy < 0:
+        return {**out, "status": "STOP"}
+    if today >= warn and vs_b < -float(rule["warn_trail_pts"]):
+        return {**out, "status": "REVIEW"}
+    return {**out, "status": "RUNNING", "next_checkpoint": (warn if today < warn else decide).isoformat()}
+
+
 def current_context(cfg: dict, today: date) -> dict:
     """What the config comments cannot say: recent code changes, today's parity, spend, the owner's decisions."""
     try:
@@ -142,7 +166,9 @@ def current_context(cfg: dict, today: date) -> dict:
     since = last_audit_date(today)
     return {"changes_since_last_audit": {"since": since.isoformat(), "commits": changes_since(since)},
             "parity": par, "api_spend": spend,
-            "owner_decisions": (cfg.get("monitor") or {}).get("owner_decisions") or []}
+            "owner_decisions": (cfg.get("monitor") or {}).get("owner_decisions") or [],
+            "stop_rule": stop_rule_status((cfg.get("governance") or {}).get("stop_rule") or {},
+                                          (par or {}).get("since_release") or {}, today)}
 
 
 def trade_stats(trades: pd.DataFrame, closes: pd.DataFrame | None, post_days) -> dict:
