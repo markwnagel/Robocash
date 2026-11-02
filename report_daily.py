@@ -23,7 +23,7 @@ from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, GetPortfolioHistoryRequest
 
 from desk.config import alpaca_keys, load_config, release, require_paper
-from desk.data import fetch_daily_bars
+from desk.data import ET, fetch_daily_bars
 from desk.notify import send, send_email
 from desk.monitor import parked
 from desk.report import (build_report, diff_fingerprint, fingerprint, holdings_at_close, load_json, movers,
@@ -80,7 +80,10 @@ def is_trading_day(trading, today: date) -> bool:
 
 def equity_series(trading: TradingClient) -> pd.Series:
     h = trading.get_portfolio_history(GetPortfolioHistoryRequest(period="1A", timeframe="1D"))
-    idx = [datetime.fromtimestamp(t, tz=timezone.utc).date() for t in (h.timestamp or [])]
+    # Alpaca stamps each daily point at 00:00 UTC after the session - 20:00 New York time on the trading day.
+    # Read as a UTC date, every close landed on the next day, so each "from" baseline in the email used the
+    # close one session earlier ("Since v2.0" measured from the 10-15 close, $9,682, not the 10-16 close, $9,361).
+    idx = [datetime.fromtimestamp(t, tz=ET).date() for t in (h.timestamp or [])]
     vals = [float(e) for e in (h.equity or [])]
     s = pd.Series(vals, index=pd.to_datetime(idx)).dropna()
     return s[s > 0]
