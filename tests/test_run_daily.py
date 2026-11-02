@@ -65,6 +65,10 @@ class FakeBroker:
     def is_trading_day(self, day):
         return True
 
+    def nth_trading_day_after(self, day, n):
+        import numpy as np
+        return np.busday_offset(np.datetime64(day), n, roll="forward").astype(date)
+
     def sell_market(self, symbol, qty):
         if getattr(self, "sell_fails", False):
             raise RuntimeError("insufficient qty available for order")
@@ -659,7 +663,7 @@ def test_halted_runs_keep_closing_positions_that_survived_the_kill_switch(wired,
                     "unrealized_plpc": -0.12}}
     holder["broker"] = FakeBroker(positions=live)
     state_mod.save_state({**state_mod.load_state(), "halted": True, "halt_reason": "drawdown 16%",
-                          "halt_date": "2026-09-20", "high_water_mark": 10000.0, "positions": {
+                          "halt_date": date.today().isoformat(), "high_water_mark": 10000.0, "positions": {
                               "S05": {"entry_date": "2026-09-01", "entry_price": 80.0, "qty": 5, "stop": 70.0,
                                       "target": 110.0, "filled": True, "thesis": "t"}}})
     run(["--no-analyst"])
@@ -881,3 +885,70 @@ def test_a_holding_is_judged_on_its_full_universe_rank_not_the_fact_checked_pool
     run(["--no-analyst"])
     assert sym in holder["broker"].closed
     assert f"{sym}" in sent[-1] and "signal decay" in sent[-1]
+
+
+def test_kill_switch_resumes_itself_after_the_backtest_cooldown(wired, cfg, monkeypatch):
+    """The backtest sits flat for risk.halt_cooldown_days sessions, then trades from a re-based high-water
+    mark. Live does the same, so a halt does not wait on a decision made under pressure."""
+    holder, sent = wired
+    n = cfg["risk"]["halt_cooldown_days"]
+    assert n == 20
+    holder["broker"] = FakeBroker(equity=8000.0, last_equity=8100.0, cash=8000.0)
+    state_mod.save_state({**state_mod.load_state(), "high_water_mark": 10000.0, "all_time_hwm": 10000.0})
+    run(["--no-analyst"])
+    st = state_mod.load_state()
+    resume_on = date.fromisoformat(st["resume_on"])
+    assert st["halted"] and resume_on == holder["broker"].nth_trading_day_after(date.today(), n)
+    assert f"resumes automatically on {resume_on}" in sent[-1]
+
+    class Day(date):
+        @classmethod
+        def today(cls):
+            return cls.fromordinal(resume_on.toordinal())
+
+    # The session before: still halted.
+    before = resume_on - timedelta(days=1)
+    monkeypatch.setattr(run_daily, "date", type("D", (date,), {"today": classmethod(lambda c: before)}))
+    holder["broker"] = FakeBroker(equity=8000.0, last_equity=8000.0, cash=8000.0)
+    run(["--no-analyst", "--force"])
+    assert not holder["broker"].brackets and "HALTED" in sent[-1]
+    # The resume date: trading restarts, drawdown measured from today's equity.
+    monkeypatch.setattr(run_daily, "date", Day)
+    holder["broker"] = FakeBroker(equity=8000.0, last_equity=8000.0, cash=8000.0)
+    run(["--no-analyst", "--force"])
+    st = state_mod.load_state()
+    assert not st["halted"] and st["high_water_mark"] == 8000.0 and st["all_time_hwm"] == 10000.0
+    assert holder["broker"].brackets and "KILL SWITCH CLEARED" in sent[-1]
+
+
+def test_the_hard_floor_never_clears_itself(wired, cfg):
+    holder, sent = wired
+    state_mod.save_state({**state_mod.load_state(), "halted": True, "hard_halted": True,
+                          "halt_reason": "HARD FLOOR", "halt_date": "2026-01-02", "high_water_mark": 10000.0})
+    holder["broker"] = FakeBroker()
+    run(["--no-analyst"])
+    st = state_mod.load_state()
+    assert st["halted"] and not st.get("resume_on") and not holder["broker"].brackets
+    assert "--resume --reset-hwm" in sent[-1]
+
+
+def test_an_older_halt_gets_a_resume_date_and_zero_cooldown_keeps_it_manual(wired, cfg, monkeypatch):
+    holder, sent = wired
+    state_mod.save_state({**state_mod.load_state(), "halted": True, "halt_reason": "drawdown 16%",
+                          "halt_date": date.today().isoformat(), "high_water_mark": 10000.0})
+    holder["broker"] = FakeBroker()
+    run(["--no-analyst"])
+    assert state_mod.load_state()["resume_on"]
+    cfg["risk"]["halt_cooldown_days"] = 0           # a stored date must not fire once the cooldown is off
+    monkeypatch.setattr(run_daily, "load_config", lambda: cfg)
+    run(["--no-analyst"])
+    assert not state_mod.load_state()["resume_on"] and "Run with --resume to re-enable" in sent[-1]
+
+
+def test_the_halt_cooldown_does_not_change_the_strategy_id(cfg):
+    """Adding risk.halt_cooldown_days must not give today's config a new trial id: the backtest already
+    hashes the same number as halt_cooldown."""
+    from desk import trials
+    without = {**cfg, "risk": {k: v for k, v in cfg["risk"].items() if k != "halt_cooldown_days"}}
+    assert trials.current_config_id(cfg) == trials.current_config_id(without)
+    assert cfg["risk"]["halt_cooldown_days"] == trials.DEFAULT_HALT_COOLDOWN

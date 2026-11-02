@@ -147,6 +147,10 @@ exits:
 risk:
   max_drawdown_pct: 0.15     # from the episode high-water mark (reset by --resume); liquidate + halt
   max_cumulative_drawdown_pct: 0.25  # from the ALL-TIME high; liquidate + halt until --resume --reset-hwm
+  halt_cooldown_days: 20     # after the 15% switch fires, stay flat this many sessions, then resume on our own from a
+                             # re-based high-water mark - what the backtest assumes (backtest.py --halt-cooldown-days,
+                             # default 20; it fired 3 times in 2023-26). 0 = wait for a manual --resume. --resume still
+                             # restarts sooner. The 25% hard floor never clears itself. (2026-11-01, audit 10-31)
   daily_loss_halt_pct: 0.05  # no new entries on a day the account is down this much
   max_daytrades_per_5d: 2
 
@@ -257,11 +261,12 @@ parity:                        # desk/parity.py: the backtest replayed over the 
                                # 50% vs 22%; 22 entries matched, 6 backtest-only (3 were the dilution block), 10 live-only
 
 budget:
-  monthly_api_usd: 40          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). Keep the
-                               # Anthropic Console limit at or above this: at the Console limit every role fails and
-                               # the desk buys nothing (2026-10-17). ~$35/mo before the 2026-10-17 cuts, ~4%/yr of
-                               # the $10k account; target <= ~1.5%/yr until the agents show value. October already
-                               # had ~$22 before the cuts; lower this to ~20 from November once telemetry shows them.
+  monthly_api_usd: 25          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). An alarm,
+                               # not a cap. Keep the Anthropic Console limit at or above this: at the Console limit every
+                               # role fails and the desk buys nothing (2026-10-17). ~$35/mo before the 2026-10-17 cuts.
+                               # 2026-11-01: 40 -> 25. Post-cut telemetry ~$0.64/trading day + the weekly audit = ~$16-18/mo,
+                               # so SEV2 ($20) sits above a normal month; 20 would have put SEV2 inside it (audit 10-31).
+                               # Target <= ~1.5%/yr of the account until the agents show value; recheck in December.
 
 report:
   to: mark@markwnagel.com   # daily activity email, 14:00 local (after the 13:40 desk run)

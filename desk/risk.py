@@ -51,6 +51,35 @@ def evaluate(equity: float, last_equity: float, state: dict, rcfg: dict) -> Risk
     return d
 
 
+def resume_date(halt_date: date, cooldown_days: int, nth_session=None) -> date:
+    """When a kill-switch halt clears itself: `cooldown_days` sessions after the halt, as the backtest
+    assumes (backtest.py sits flat for halt_cooldown bars, then trades again from a re-based high-water
+    mark). Uses the exchange calendar when given one; otherwise weekdays, which can land a holiday early."""
+    import numpy as np
+    if nth_session is not None:
+        try:
+            return nth_session(halt_date, cooldown_days)
+        except Exception:
+            pass
+    return np.busday_offset(np.datetime64(halt_date), cooldown_days, roll="forward").astype(date)
+
+
+def clear_halt(state: dict, reset_hwm: bool = False) -> None:
+    """What --resume does: lift the halt and re-base the episode high-water mark on the next equity read,
+    so the same drawdown does not trip the switch again at once."""
+    state.update(halted=False, hard_halted=False, halt_reason="", halt_date="", resume_on="")
+    state["high_water_mark"] = 0.0
+    if reset_hwm:
+        state["all_time_hwm"] = 0.0
+
+
+def auto_resume_due(state: dict, today: date) -> bool:
+    """A soft kill-switch halt with a resume date that has arrived. The hard floor never clears itself."""
+    if not state.get("halted") or state.get("hard_halted") or not state.get("resume_on"):
+        return False
+    return today >= date.fromisoformat(state["resume_on"])
+
+
 def can_exit_today(pos: dict, today: date, daytrade_count: int, rcfg: dict, session_open: bool = False) -> bool:
     """Avoid same-day round trips that would count toward the pattern-day-trader limit.
 
