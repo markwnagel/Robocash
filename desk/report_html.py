@@ -284,6 +284,9 @@ def build_html(ctx: dict) -> str:
                 f'<span style="color:{tone};font-weight:700;text-transform:uppercase;">{escape(h["status"])}</span>'
                 f'<span style="color:{MUTED};"> &middot; {escape(trim_text(h.get("summary", ""), max_sentences=2, max_chars=300))}'
                 f'</span></td></tr>')
+        if h.get("findings") and h.get("analysis") == "deterministic" and h.get("reviewed_on"):
+            rows += ("<tr>" + _cell("", width="52px") + _cell(f'Open findings as of the {escape(h["reviewed_on"])} model '
+                                                              f'review (not re-checked today):', muted=True) + "</tr>")
         for f in h.get("findings", [])[:8]:
             sev = f["severity"]
             rows += ("<tr>" + _cell(f'<span style="color:{NEG if sev in ("SEV1", "SEV2") else MUTED};font-weight:600;'

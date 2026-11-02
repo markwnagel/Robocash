@@ -334,7 +334,7 @@ def plain_summaries(moves: list, cfg: dict) -> dict:
                 out[key] = text
                 applied += 1
                 overran += text != raw
-        telemetry.llm_call("summarizer", model, started, [resp])
+        telemetry.llm_call("summarizer", model, started, [resp], trades=len(moves), input_chars=len(json.dumps(payload, default=str)))
         telemetry.agent_output("summarizer", len(moves), applied, fell_back=len(moves) - applied,
                                trimmed_for_length=overran)
     except Exception as e:                      # a prettier email is never worth a failed report
@@ -513,6 +513,8 @@ def build_report(ctx: dict) -> str:
         L.append("SYSTEM HEALTH (agent monitor)")
         summary = trim_text(h.get("summary", ""), max_sentences=2, max_chars=300)
         L += _wrap(f"{h['status'].upper()}" + (f" - {summary}" if summary else ""), indent="  ")
+        if h.get("findings") and h.get("analysis") == "deterministic" and h.get("reviewed_on"):
+            L.append(f"  Open findings as of the {h['reviewed_on']} model review (not re-checked today):")
         L += [f"  [{f['severity']}] {f['id']} {f['title']}" + (f" ({f['trend']})" if f.get("trend") else "")
               for f in h.get("findings", [])[:8]]
         if h.get("parked"):

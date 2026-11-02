@@ -273,6 +273,7 @@ def main() -> None:
         "release": cfg.get("release"),
         "open_findings": open_f, "previous_recommendations": recs,
         "owner_decisions": mcfg.get("owner_decisions") or [],
+        "owner_resolutions": mcfg.get("owner_resolutions") or [],
     }
 
     result, reason, analysis = None, "skipped (--no-llm)", "deterministic"
@@ -350,7 +351,9 @@ def main() -> None:
     }
     atomic_write_text(MON_DIR / "state.json", json.dumps(new_state, indent=1, default=str))
     shown = str(rpath.relative_to(root)) if rpath.is_relative_to(root) else str(rpath)
-    atomic_write_text(MON_DIR / "latest.json", json.dumps(summary_for_email(result, shown, analysis), indent=1))
+    reviewed = new_state["last_model_review"]
+    atomic_write_text(MON_DIR / "latest.json", json.dumps(summary_for_email(
+        result, shown, analysis, reviewed_on=str(reviewed)[:10] if reviewed else None), indent=1))
     telemetry.note(status_reported=result["status"], findings=len(result["findings"]), analysis=analysis,
                    escalated=len(todo), escalation=sent)
     print(f"monitor: {result['status']} - {len(result['findings'])} finding(s); report {rpath}")

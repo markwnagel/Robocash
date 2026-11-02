@@ -287,6 +287,20 @@ monitor:                       # agent reliability monitor (monitor.py): runs we
     - "2026-10-17: the cash sweep is not built live; the owner revisits it on 2026-11-06."
     - "2026-10-17: the model review runs Fridays and on hard-alarm days; other days are rules-only."
     - "2026-10-23: the parity alarm judges the gap since the current release; the full-window gap is context."
+  owner_resolutions:           # findings the owner has settled; the model review closes each unless new evidence reopens it
+    - "F-41 / R-49: verified 2026-10-24 - the audit's first reply was empty, the retry caught it, the second was used."
+    - "F-51 / R-59: applied (PR #41) - the same-names gap is split into size and return in parity; the signal-decay rank bug behind most of the return part is fixed."
+    - "F-45 / R-53: declined - the replay follows the current rules (owner decision 2026-10-17)."
+    - "F-47 / R-55: not a defect - AVTR's two 8-K rows were two separate SEC filings."
+    - "F-38 / R-44: not pursued - each headline the roles see already carries its [source]."
+    - "F-31 / R-45: covered - web-only cases are capped at 0.5 and undated pages count as no evidence; a search with no citation means no web claim was made."
+    - "F-44: resolved - model id and price basis are on every llm_call since PR #38."
+    - "F-46: resolved - the classifier prompt defines insiders as Form 4 filers (PR #36)."
+    - "F-49: resolved - red team scope is policy (owner decision 2026-10-17); the skip is logged."
+    - "F-40 / R-48: addressed - usage-limit refusals are outcome api_access (PR of 2026-10-29) and alarm SEV1; spend alarms at 80%/100%; the November threshold is on the 11-06 review."
+    - "F-30 / R-41: measured - the classifier now counts unrelated headlines (cls_unrelated_headlines, feed news_classified); judge the filter's leak from that."
+    - "F-33 / R-40: measured - earnings_date_conflict flags a next report within 45 days of the last results 8-K."
+    - "R-42: applied - summarizer calls carry trades and input_chars."
   window_hours: 24             # first run only; afterwards the window is "since the previous monitor run"
   baseline_days: 7
   agents:                      # SLOs are set only where a real contract exists; the rest is baseline-only
