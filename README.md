@@ -1,104 +1,86 @@
 # Robocash
 
-Systematic, long-only, no-leverage US equity strategy for a small Alpaca account. Runs once a day after the close,
-holds up to 20 names for 21-126 days (v2.1) with broker-side stops, and has a hard-coded drawdown kill switch.
-An intelligence layer turns SEC filings, news, options, and social data into structured facts; Claude plays a
-red team and a veto-only analyst on top of that; a weekly auditor attacks the process itself.
+Systematic, long-only, no-leverage US equity strategy for a small Alpaca paper account. It runs once a day after
+the close, holds up to 20 names for 21-126 days with broker-side stops, and has a hard-coded drawdown kill switch.
+An intelligence layer turns SEC filings, news, options and social data into structured facts; Claude plays a red
+team and a veto-only analyst on top of that; a weekly auditor attacks the process itself.
 
-**This is not investment advice and the strategy is not proven.** Run it in paper mode first and expect a year
-of data before you can distinguish it from noise.
+**Current release: v2.1 "slow and wide"** (from the 2026-10-30 close) - see [Releases](#releases).
+
+**This is not investment advice and the strategy is not proven.** Run it in paper mode and expect a year of data
+before you can distinguish it from noise.
+
+Contents: [How it works](#how-it-works) · [Releases](#releases) · [Setup](#setup) · [Commands](#commands) ·
+[Schedule](#schedule) · [Your intervention](#your-intervention) · [Costs](#costs) ·
+[Research and backtests](#research-and-backtests) · [Known limitations](#known-limitations)
 
 ## How it works
 
 ```
-run_daily.py (16:45 ET, weekdays)
-  1. sync state with the broker; log any positions closed by stop/target
-  2. RISK GOVERNOR  drawdown from episode high-water mark >= 15% -> liquidate, halt 20 sessions, then resume
-                                                                    on its own as the backtest does
-                                                                    (risk.halt_cooldown_days; --resume = sooner)
-                    drawdown from ALL-TIME high >= 25%           -> liquidate, halt until --resume --reset-hwm
-                    day down >= 5%                               -> no new entries today
-                    (--resume re-baselines the episode HWM, so each episode is capped at 15%; the
-                    all-time floor is the cumulative backstop and needs an explicit acknowledgement)
-  3. universe       NYSE/Nasdaq common stock, price >= $5, 20d avg dollar volume >= $20M, top 800 (cached weekly)
+run_daily.py (13:40 PT = 16:40 ET, weekdays)
+  1. sync           state with the broker; log any positions closed by a stop
+  2. RISK GOVERNOR  drawdown from episode high-water mark >= 15% -> liquidate, halt, resume on its own after
+                      20 sessions (risk.halt_cooldown_days, as the backtest does); --resume restarts sooner
+                    drawdown from ALL-TIME high >= 25%            -> liquidate, halt until --resume --reset-hwm
+                    day down >= 5%                                -> no new entries today
+                    (a resume re-baselines the episode HWM, so each episode is capped at 15%; the all-time
+                    floor is the cumulative backstop and needs an explicit acknowledgement)
+  3. universe       NYSE/Nasdaq common stock, price >= $5, 20d avg dollar volume >= $20M, top 800 (rebuilt weekly)
   4. signals        12-1 month momentum (60%), 20-day return (20%), low realized vol (20%);
-                    must be above 50-day MA, positive momentum, 14-day ATR <= 8% of price
-  5. REGIME GATE    SPY below its 200-day MA or VIX > 30 -> target position count halved (code, from Alpaca + FRED)
-                    If the SPY/regime data fails, the halved (risk-off) target applies until it is back;
-                    nothing is sold for it, even with off_liquidate.
-  6. FACT SHEETS    for the top 30 candidates + holdings (desk/facts.py). Each source degrades on its own,
-                    but if the sheets cannot be built at all, or the earnings calendar is unknown (no
-                    FINNHUB_API_KEY, Finnhub down), no new entries are made that day:
-                      SEC EDGAR   dilution filings (8-K 3.02, S-1), shelf filings (424B, S-3) flagged
-                                  separately, 8-K items, Form 4 insider buys/sells
-                      Finnhub     next earnings date (one query per symbol - see the note below)
+                    must be above its 50-day MA, positive momentum, 14-day ATR <= 8% of price
+  5. REGIME GATE    SPY below its 200-day MA or VIX > 30 -> target position count halved (code, Alpaca + FRED).
+                    If the SPY/regime data fails, the halved target applies until it is back; nothing is sold for it.
+  6. FACT SHEETS    for the top 30 candidates + holdings (desk/facts.py). Each source degrades on its own, but if
+                    the sheets cannot be built at all, or the earnings calendar is unknown, no new entries today:
+                      SEC EDGAR   dilution filings (8-K 3.02, S-1), shelf filings (424B, S-3), 8-K items, Form 4
+                      Finnhub     next earnings date (one query per symbol - see calibration notes)
                       Alpaca      Benzinga headlines (Claude-classified: tone + offering/guidance/M&A/legal flags)
                       Alpaca      options chain -> ATM implied vol vs 20d realized vol, put skew
                       StockTwits  message rate vs the name's own history (z-score), bullish share
-                    HARD BLOCKS (candidates only): earnings within 5 calendar days (a report today
-                      included; a failed lookup blocks too), unambiguous dilution filing, headline
-                      offering or acquisition target, social-volume z >= 3.
+                    HARD BLOCKS (candidates only): earnings within 5 calendar days (a report today included; a
+                      failed lookup blocks too), headline offering or acquisition target, social-volume z >= 3.
                     HALF SIZE: implied/realized vol >= 1.5 (floored at 1 share).
-                    ANALYST FLAG, not a block: shelf registrations - a 424B takedown may be debt, and an
-                      S-3ASR is routine for a large issuer, so the analyst reads the filing instead.
+                    ANALYST FLAGS, not blocks: dilution filings (facts.offering_block: false since 2026-10-17)
+                      and shelf registrations - the analyst reads the filing instead.
   7. exits          held >= 126 days -> close; held >= 21 days and rank fell past 80 -> close;
-                    broker-side stop 4x ATR below the fill, no take-profit leg (v2.1; v2.0 was 2x ATR + 3R)
-                    TRAILING STOP (exits.trail_atr_multiple > 0): each evening the stop is raised to
-                      (highest close since entry - k x ATR), never lowered, and the broker-side stop is
-                      replaced. Pair with take_profit_r_multiple: 0 so winners are not capped at 3R.
-                    PYRAMIDING (portfolio.pyramid_max_adds > 0): a holding that has moved one initial-risk
-                      unit past its last entry gets another unit, sized like a fresh entry, capped by the
-                      position limit, sharing the trailed stop. Never for a name the analyst is cutting.
-                    REGIME LADDER (regime.ladder): strong = SPY well above its MA with VIX calm ->
-                      fewer, larger positions; off = below the MA -> half size, or flat if off_liquidate.
+                    broker-side stop 4x ATR below the fill, no take-profit leg
+                    Wired but off: trailing stop (exits.trail_atr_multiple), pyramiding (portfolio.pyramid_max_adds),
+                      regime ladder / cash below the 200-day (regime.ladder, regime.off_liquidate).
   8. entries        fill open slots from the re-ranked list, at most 4 new names per session, skipping any
-                    candidate correlated > 0.75 with more than one holding (zero tolerance was backtested
-                    and lost on both return and drawdown); each position risks 1% of equity
-                    with the stop distance setting the share count (`portfolio.sizing: risk_parity`),
-                    capped at 7% of equity, 20 names targeted. Only fact-checked names are eligible; anything the analyst
-                    has not reviewed (past its capacity, or given no verdict) is dropped; no entries at all if
-                    the last bar is not the latest session.
-  9. RED TEAM       Claude writes the strongest bear case per name (trap type + severity) from the fact sheet
+                    candidate correlated > 0.75 with more than one holding. Each position risks 1% of equity,
+                    the stop distance setting the share count (portfolio.sizing: risk_parity), capped at 7% of
+                    equity, 20 names targeted. Only fact-checked, analyst-reviewed names are eligible; no
+                    entries at all if the last bar is not the latest session.
+  9. RED TEAM       Claude writes the strongest bear case per buy candidate (trap type + severity)
  10. ANALYST        Claude rules KEEP / REMOVE / REDUCE per name with facts + bear case in hand. Veto-only.
-                    REDUCE keeps `analyst.reduce_factor` of an entry's shares, floored, min 1 share;
-                    capped at 1.0 in code so no config value can make a veto enlarge a position. 1.0 since
-                    2026-10-17: REDUCE is recorded on the entry but no longer shrinks it (see config.yaml).
-                    A REDUCE on a stock already held is a concern, not a trade: noted once, see limitations.
-                    If the API call fails: no new entries today, holdings untouched. An entry it gives no
-                    KEEP / REMOVE / REDUCE verdict for is dropped: nothing is bought unreviewed.
+                    REDUCE is recorded but no longer shrinks an entry (analyst.reduce_factor 1.0 since 2026-10-17;
+                    capped at 1.0 in code). On a stock already held it is a note, not a trade.
+                    If the call fails: no new entries today, holdings untouched. An entry with no verdict is dropped.
  11. final gate     position count, per-position size, 5% cash floor, day-trade guard (code, not LLM)
-     trim           a holding that drifts to 15% of equity (portfolio.trim_above_pct) is sold back to 10% at the
-                    next open: its stop is cancelled, the excess sold, and the stop re-placed for the rest. Between
-                    the 10% entry cap and 15% it is a note. No trim fired in 8.7 years of backtests - the 3R target
-                    sells a winner first - so this is a safety net, and results are unchanged.
- 12. execute        exits: cancel bracket legs, close.  entries: limit @ close*1.005 with attached
-                    stop (2 x ATR) and take-profit (3R) - exits run broker-side even if this job dies
-      PROTECTION    a bracket's legs inherit the entry's DAY tif: they go live when the entry fills and
-                    EXPIRE AT THAT DAY'S CLOSE, leaving the position naked from the next session on
-                    (found live 2026-09-16, three positions unprotected for a day and a half). So every
-                    run re-checks each holding for a live stop at the broker and re-places any missing one
-                    as a GTC OCO (stop + target). Two traps this hides: a resting stop sits in status
-                    "held", which a status=OPEN query does NOT return, and a market sell carries neither
-                    stop_price nor limit_price - a checker filtering on those reports a false "unprotected".
-                    The bracket is priced from the signal-day close (the fill is not known yet); on the run
-                    that first sees the fill, the stop and target move to the same distances from the fill
-                    price, as the backtest measures them, before that evening's GTC protection is placed.
-                    A holding already below its stop with nothing resting is closed outright. A holding
-                    with no stop on record (adopted from the broker) or whose re-placement is rejected is a
-                    MANUAL ACTION note in every brief and a SEV1 monitor alarm until it is fixed.
-      FAILURES      one rejected order (a stop, a close, an entry) is noted and the rest still go in; a
-                    rejected close re-places the stop it had cancelled; state is saved after every
-                    submitted entry. If bars, the universe or the signals fail, the run makes no exits or
-                    entries but still re-checks every stop and writes the brief, then fails (SEV1).
-      GAPS          a holding with no complete bar today (trading halt, feed gap) is not sold as signal
-                    decay; that check waits for data. Time, regime and earnings exits still apply.
-      HALTED        every halted run re-sends the close for anything the kill switch failed to flatten -
-                    liquidation cancels the stops first, so a survivor is otherwise open and unprotected.
+     trim           a holding that drifts to 15% of equity is sold back to 10% at the next open, its stop
+                    re-placed for the rest. A safety net: it never fired in v2.0's backtests.
+ 12. execute        exits: cancel the stop, market sell at the next open.
+                    entries: limit @ close x 1.005 with an attached stop (OTO; a bracket when a target is set).
+      PROTECTION    attached legs inherit the entry's DAY time-in-force and expire at that day's close, so every
+                    run re-checks each holding for a live stop at the broker and re-places any missing one as GTC
+                    (OCO with the target when there is one). On the run that first sees a fill, the stop moves to
+                    the same distance from the fill price, as the backtest measures it. A holding already below
+                    its stop with nothing resting is closed outright; one with no stop on record, or whose
+                    re-placement is rejected, is a MANUAL ACTION in every brief and a SEV1 monitor alarm.
+                    Two traps: a resting stop has status "held", which a status=OPEN query does NOT return, and a
+                    market sell carries neither stop_price nor limit_price.
+      FAILURES      one rejected order is noted and the rest still go in; a rejected close re-places the stop it
+                    cancelled; state is saved after every submitted entry. If bars, the universe or signals fail,
+                    the run makes no exits or entries but still re-checks every stop and writes the brief (SEV1).
+      GAPS          a holding with no complete bar today (halt, feed gap) is not sold as signal decay.
+      HALTED        every halted run re-sends the close for anything the kill switch failed to flatten.
  13. brief          printed, saved to state/briefs/, POSTed to a webhook if configured
 
-audit.py (Saturday)   deterministic trade stats incl. what each stock did 20 days AFTER we exited, then Claude
-                      hunts for process failures and proposes <= 3 config changes with a required backtest check.
-                      It never edits config. Saved to state/audits/ and emailed to report.to (audit.email).
+report_daily.py (14:00 PT)  the day's email: results, holdings, orders for the next open, moves, news,
+                            performance against SPY, system health, and any config/code change since the last email
+monitor.py      (14:00 PT)  agent reliability monitor, just before the email - see Schedule
+audit.py        (Sat 09:00) deterministic trade stats, then Claude hunts for process failures and proposes <= 3
+                            config changes, each with a required backtest check. It never edits config.
 ```
 
 ### The governing rule
@@ -110,179 +92,266 @@ is a prompt-injection surface. So:
 - Fact-sheet items can *block* a candidate or *shrink* a size. None can add a name or enlarge a position.
 - The red team and analyst can only say REMOVE or REDUCE. `test_verdicts_can_only_reduce_risk` pins that down.
 - The only fact that can *tilt ranking upward* is insider cluster buying, and its weight defaults to `0.0`.
-  Enable it only after `scripts/build_insider_history.py` + a backtest show it helps (see below).
+  Enable it only after `scripts/build_insider_history.py` + a backtest show it helps.
 - Every risk limit is enforced in `desk/risk.py` / `desk/portfolio.py`, which the LLM roles never touch.
 
 ## Releases
 
-A release is a named version of the strategy, with results reported from its own start (`config.yaml` `release`,
-git tags `v1.0`, `v2.0`, ...). v1.0 is the code of the 2026-10-16 desk run; v2.0 is the 2026-10-17 engineering
-review, counted from the 10-16 close ($9,361) - its first desk run is 2026-10-19.
+A release is a named version of the strategy with results reported from its own start (`config.yaml` `release`,
+git tags, GitHub Releases).
 
-- The daily email leads its performance table with "Since v2.0" beside since inception, both against SPY.
+| Release | Counted from | What changed |
+|---|---|---|
+| v1.0 | inception, 2026-09-15 | the original desk |
+| v2.0 | 2026-10-16 close ($9,361) | engineering review 2026-10-17: cost cuts, REDUCE and the dilution block retired |
+| v2.1 "slow and wide" | 2026-10-30 close | quant review 2026-11-01: 12-month momentum, 4x ATR stop with no target, decay rank 80, holds of 21-126 days, 20 names at 7% |
+
+v2.1 is the first change to clear the owner's bar in both backtest windows (under live frictions, and in every
+start with the SPY sweep); the numbers sit in `config.yaml` above `release`. Positions opened under v2.0 keep their
+2x-ATR stops and 3R targets at the broker and their `v2.0` label; v2.1's decay and hold rules apply to them.
+
+- The daily email leads its performance table with "Since v2.1" beside since inception, both against SPY.
 - New positions, trade-log rows (`release` column) and shadow-book entries carry the release. Positions held at
-  the cut are v1's picks: they close as `v1.0 (carried)`. Trades closed before the column existed are `v1.0`.
-- The live-vs-backtest section and the weekly audit report the current release on its own, beside the whole history.
+  a cut close as `<old release> (carried)`.
+- The live-vs-backtest section and the weekly audit report the current release beside the whole history.
 - Risk limits never reset at a release: the kill switch, high-water mark and cumulative floor are continuous.
 
-v2.1 "slow and wide" (quant review 2026-11-01) is counted from the 10-30 close: 12-month momentum, a 4x ATR stop with
-no target, decay rank 80, holds of 21-126 days, 20 names at 7%. It is the first change to clear the owner's bar in
-both windows (under live frictions, and in every start with the SPY sweep); `config.yaml` above `release` has the
-numbers. Positions opened under v2.0 keep their 2x-ATR stops and 3R targets at the broker and their `v2.0` label; the
-v2.1 decay and hold rules (rank 80, 21-126 days) apply to them from the first v2.1 run.
+**Stop rule** (`governance.stop_rule`). The alternative to the desk is a momentum ETF, not cash, so v2.1 is judged
+against SPMO and SPY from its release date. The weekly audit reports the status:
 
-To cut v3: change `release.name` and `release.since` (the last close under the old version), merge, and tag the merge.
+- **REVIEW** on or after 2027-04-30 if the desk trails SPMO by more than 20 points - the owner looks again.
+- **STOP** on or after 2027-10-29 if it trails SPMO by more than 15 points *and* trails SPY - replace the stock
+  picker with SPMO; the owner decides.
 
-## The shadow book: what the layers on top of the engine are worth
+Calibrated on v2.1's own backtest: it trails SPMO by those margins by chance 8% (7 months) and 19% (12 months) of
+the time.
 
-The quant engine is backtested; the AI analyst's REMOVE, the red team behind it, the headline and SEC-filing blocks,
-the earnings block and the implied-vol half size are not. Each desk run appends every decision that changed what was
-bought to `state/shadow/book.jsonl` (local, not committed), with the day's buys as the control group. The weekly audit
-replays each one with the desk's own bracket (stop 2x ATR, 3R target, 60-day max hold) and against SPY, and shows the
-groups side by side (`desk/shadow.py`). The retirement rule was set before any data (`shadow.min_closed: 30`): a group
-whose kept-out names did at least as well as the names bought, over 30 closed brackets, is flagged for retirement -
-the owner decides. Blocked names count once per four weeks. `scripts/backfill_shadow.py` seeded the book from the
-briefs of 2026-09-14 to 10-16; candidates the analyst vetoed before staging are recorded only from 2026-10-19.
+To cut a new release: set `release.name` and `release.since` (the last close under the old version), merge, tag the
+merge, and publish a GitHub Release from the tag.
+
+### The shadow book: what the layers on top of the engine are worth
+
+The quant engine is backtested; the analyst's REMOVE, the red team behind it, the headline and earnings blocks and
+the implied-vol half size are not. Each desk run appends every decision that changed what was bought to
+`state/shadow/book.jsonl` (local, not committed), with the day's buys as the control group. The weekly audit
+replays each one with the desk's own exit rules and against SPY, and shows the groups side by side
+(`desk/shadow.py`). The retirement rule was set before any data (`shadow.min_closed: 30`): a group whose kept-out
+names did at least as well as the names bought, over 30 closed trades, is flagged for retirement - the owner
+decides. Blocked names count once per four weeks.
 
 ## Setup
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env     # Alpaca paper keys, Anthropic key, SEC_USER_AGENT, optional FINNHUB_API_KEY
+cp .env.example .env     # Alpaca paper keys, Anthropic key, SEC_USER_AGENT, FINNHUB_API_KEY, mail settings
 .venv/bin/python -m pytest -q
 ```
 
-- Alpaca paper keys: app.alpaca.markets -> Paper Trading -> API Keys. Paper accounts are margin accounts by
-  default; the code never spends more than settled cash, so it stays unlevered regardless.
-- `SEC_USER_AGENT="Your Name you@example.com"` is required by the SEC's fair-access policy; without it filings and
-  insider data are skipped.
-- `FINNHUB_API_KEY` (free tier) gives the earnings calendar. Without it every candidate's earnings date is unknown,
-  so every candidate is blocked and the desk makes no new entries (exits and stops still run).
+- **Alpaca paper keys:** app.alpaca.markets -> Paper Trading -> API Keys. Paper accounts are margin accounts by
+  default; the code never spends more than settled cash, so it stays unlevered.
+- **`SEC_USER_AGENT="Your Name you@example.com"`** is required by the SEC's fair-access policy; without it filings
+  and insider data are skipped.
+- **`FINNHUB_API_KEY`** (free tier) gives the earnings calendar. Without it every candidate's earnings date is
+  unknown, so every candidate is blocked and the desk makes no new entries (exits and stops still run).
+- **Mail:** `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` (+ optional `SMTP_PORT`, `REPORT_FROM`) or `RESEND_API_KEY`.
+  With neither, emails are still written to `state/reports/`.
 
 ## Commands
 
 ```bash
-.venv/bin/python run_daily.py --dry-run       # full run incl. fact sheets + LLM roles; submits nothing, saves no
-                                              # state, prints the brief instead of writing it (the email reads it)
+.venv/bin/python run_daily.py --dry-run       # full run incl. fact sheets + LLM roles; submits nothing, saves nothing
 .venv/bin/python run_daily.py                 # real run against the account in config.yaml (paper: true)
 .venv/bin/python run_daily.py --resume        # clear a kill-switch halt now instead of on its resume date
-                                              # (re-baselines the high-water mark)
 .venv/bin/python run_daily.py --no-analyst    # skip red team + analyst (engine + facts + risk only)
-.venv/bin/python audit.py                     # weekly process audit (add --stats for numbers only, no LLM)
+.venv/bin/python report_daily.py --print      # build the daily email without sending it
+.venv/bin/python monitor.py --print           # health check: analyze and print, save and send nothing
+.venv/bin/python monitor.py --no-llm          # signals and the rules-only report, no Claude call
+.venv/bin/python audit.py                     # weekly process audit (--stats for numbers only, no LLM)
 .venv/bin/python audit.py --email-saved       # email the latest saved audit again (--date, --resend)
-.venv/bin/python report_daily.py              # daily activity email (14:00 job); --print to build without sending
-.venv/bin/python backtest.py --start 2023-09-11 --end 2026-09-11              # frozen universe, reproducible
-.venv/bin/python backtest.py --start 2023-09-11 --end 2026-09-11 --risk-per-trade 0.0125 --stagger 6
-.venv/bin/python scripts/build_pit_universe.py   # point-in-time universe 2017-2026, delisted names included (once)
-.venv/bin/python robustness.py                   # 216-run robustness study of config.yaml on it (~2 min)
+
+.venv/bin/python backtest.py --start 2023-09-11 --end 2026-09-11   # frozen universe, reproducible
+.venv/bin/python backtest.py --start 2023-09-11 --stagger 6        # the setting from 6 start dates vs config.yaml
+.venv/bin/python scripts/build_pit_universe.py                     # point-in-time universe 2017-2026 (once)
+.venv/bin/python robustness.py                                     # robustness study of config.yaml on it
+.venv/bin/python scripts/trials_report.py --write-readme           # refresh the trials table below
 ```
 
-### Backtesting the qualitative features
-
-The regime gate is backtested automatically (SPY + FRED VIX history). Earnings exclusion and the insider tilt
-need history files first:
+## Schedule
 
 ```bash
-.venv/bin/python scripts/build_earnings_history.py --start 2023-01-01   # -> state/history/earnings.csv
-.venv/bin/python scripts/build_insider_history.py  --start 2023-01-01   # -> state/history/insider.csv (slow: EDGAR at 10 req/s)
+for p in daily report weekly-audit; do
+  sed "s|__PROJECT_DIR__|$(pwd)|g" launchd/com.alpaca-desk.$p.plist > ~/Library/LaunchAgents/com.alpaca-desk.$p.plist
+  launchctl load ~/Library/LaunchAgents/com.alpaca-desk.$p.plist
+done
+launchctl list | grep alpaca-desk      # should show all three, after any restart too
 ```
 
-Bar panels are cached under `state/cache` and keyed by fetch date, so yesterday's is never read again.
-Each fetch deletes panels older than `data.cache_retention_days` (2); set it to 0 to keep everything and
-expect roughly 20MB per run. Fact sheets, the earnings calendar, the EDGAR store and the VIX history sit
-in the same directory and are never pruned.
+| Job | When (Mac local, Pacific) | Runs |
+|---|---|---|
+| `com.alpaca-desk.daily` | weekdays 13:40 (16:40 ET) | `launchd/teamrobo-desk` -> `run_daily.py` |
+| `com.alpaca-desk.report` | weekdays 14:00 | `launchd/teamrobo-email` -> `monitor.py`, then `report_daily.py` |
+| `com.alpaca-desk.weekly-audit` | Saturday 09:00 | `audit.py` |
 
-`backtest.py` picks the files up if present and logs which features are active. To evaluate the insider tilt,
-run the backtest with `facts.insider_tilt_weight: 0.0` and again with e.g. `0.1`, on a period you did not use
-to pick the weight. Only then set it in config for live runs.
+- **launchd uses the Mac's local time.** On a machine in another zone, convert before editing the plists.
+- **Allow them in the background.** macOS loads these jobs at login only if they are switched on under System
+  Settings > General > Login Items & Extensions > Allow in the Background, where they appear as `teamrobo-desk`,
+  `teamrobo-email` and `caffeinate`. Named scripts are used for that reason: inline `/bin/sh -c` commands were
+  listed as "sh", got switched off, and did not load after a restart (2026-09-27).
+- **Waking the Mac.** launchd does not wake a sleeping Mac. A `pmset repeat wakeorpoweron` event at 13:40 starts the
+  desk job, which keeps the machine awake (`caffeinate -i`) for 20 minutes after it finishes and at least until
+  14:50, carrying it through the email and the 14:30 health review (a Claude app scheduled task). The Saturday audit
+  has no wake of its own and runs whenever the Mac is next awake - harmless, it only reads.
+- **When the schedule slips.** launchd starts a missed job when the Mac next wakes. Before 16:20 ET on a session day
+  that run is protect-only (sync, kill switch, stop check; no exits or entries). A desk run that finishes after
+  14:00 sends the day's email itself; `report_daily.py` sends at most one email a day (`--resend` overrides). Every
+  job checks that all three jobs are loaded and the 13:40 wake is scheduled - a problem is a MANUAL ACTION in the
+  brief and email, a SEV1 in the monitor, and an alert from the Saturday audit. Stops sit at the broker and are
+  unaffected by a missed run; time exits and the kill switch wait for the next one.
+- **How a run knows it was scheduled.** Each plist sets `TEAMROBO_JOB` to its label; telemetry records a run as
+  `launchd` only when that is present, and every `run_start` records the process chain (`Python<sh<launchd`).
 
-Sizing can be compared without editing config:
+### The daily email
 
-```bash
-.venv/bin/python backtest.py --start 2024-03-01 --sizing risk_parity --tag rp
-.venv/bin/python backtest.py --start 2024-03-01 --sizing notional   --tag nt
-```
+Results, current holdings, orders working for the next open, notable moves and news, performance against SPY
+(since the current release, inception, week, month, YTD), live drawdown and volatility against their backtest
+range, system health, and any change to config or code since the last email (`state/fingerprint.json`). It never
+submits or cancels an order.
 
-### Reproducible backtests
+- Each buy and sell carries a one- or two-sentence explanation: `report.summary_model` paraphrases the analyst's
+  own wording, display-only. Any failure falls back to sentences built from the structured fields.
+- **The balance will not match Alpaca exactly.** At 14:00 PT after-hours trading is still moving the marks, so the
+  equity is a live snapshot, and the email states its time. Cash matches to the penny. The equity history is dated
+  by the New York session (Alpaca stamps daily points at 00:00 UTC, which is the previous evening in New York).
 
-Until 2026-09-24 the backtest borrowed the live universe, which rebuilds weekly, and fetched prices through the
-day it was run - so the same command drifted. The three-year baseline quoted everywhere as **+247%** re-ran at
-**+124.6%** after the 2026-09-21 universe rebuild, then at **+143.8%** once one stock (TEVA) that a download had
-silently returned empty was restored. **Every figure dated 2026-09-12 in this README and in `config.yaml`
-comments was measured on a universe that no longer exists and does not reproduce - treat those as directional.**
+### Agent reliability monitor
 
-Now:
-- The universe is a frozen snapshot, `state/history/universe_bt.json` (800 names, built 2026-09-21, id
-  `12be6539`). Only `--rebuild-universe` changes it; a rebuild moves every result, so re-run the baseline
-  before comparing anything. `--min-dollar-volume` / `--max-symbols` get their own snapshot.
-- Prices stop at `--end` and are saved on first download to `state/history/prices/` (one file per
-  universe and window, ~45MB for 800 names over 3 years, never pruned) and reused on every later run, so a re-run cannot pick up a
-  feed gap the first run did not have. `--refetch-prices` downloads them again deliberately.
-- A held name with no bar on some day is valued and, if forced out, sold at its last known price, and the
-  signal-decay check waits for data - the same rule the live run follows.
-- A stock the feed returns empty is fetched again once, then named in a `STILL no bars` warning (the same
-  retry protects the live run, where a missing holding would otherwise be sold as signal decay).
-- The first line of every result states the snapshot, its id, the end date and data coverage, e.g.
-  `data for 800/800`. Results with a different id or coverage are not comparable.
-- The same command gives byte-identical output - checked by deleting the price cache and re-downloading.
+Every job run and every Claude call is one line of JSON in `state/telemetry/<date>.jsonl` (`desk/telemetry.py`):
+run start and end, each call's role, model, tokens, cost, latency and outcome, what each AI role returned against
+what it was asked, and every WARNING or ERROR log line. Secrets are redacted; a telemetry failure never affects a run.
 
-Baseline on the snapshot, 2023-09-11 to 2026-09-11: **+143.8%, max drawdown -19.2%, Sharpe 1.33**, with the kill
-switch firing three times (Oct 2023, Mar 2025, Jul 2026). Across six start dates a month apart the baseline
-ranges from +121% to +171%.
+`monitor.py` runs just before the 14:00 email and reviews everything since its previous run:
 
-**Judge a setting with `--stagger`, never one window.** A single path is dominated by when the kill switch
-happens to fire: 1.25% risk per trade looked like +76 points on one run mostly because it tripped the switch a
-few days earlier in two sell-offs. `--stagger N` re-runs the window from N start dates a month apart, the
-setting against the untouched `config.yaml`, and reports how often it wins on return, drawdown and Sharpe. The
-staggered windows share most of their path (same end date, same crashes), so 6/6 is consistency, not six
-independent confirmations.
+- **Code computes, Claude interprets.** `desk/monitor.py` works out expected against actual runs from the installed
+  schedules and the market calendar, golden signals per AI role against a 7-day baseline, new error signatures, and
+  config/code/schedule changes. The Claude review (`agent-monitor-prompt.md`) runs on Fridays, on any day a hard
+  alarm fires, and at least weekly (`monitor.model_review_weekdays`); other days write a rules-only report.
+- **Hard alarms do not depend on the model.** SEV1 in code: a desk run missed, crashed or never finished; a holding
+  without a verified broker-side stop; a kill-switch halt; a daily report that did not run or whose email failed;
+  API spend over `budget.monthly_api_usd` (SEV2 at 80%). If the Claude call fails, a fallback report is still
+  written and the alarms still escalate.
+- **Output.** `state/monitor/reports/<date>.md`; the email's System health section; SEV1 is also emailed at once,
+  one email per underlying problem.
+- **Read-only.** It never touches orders, positions, config or code; recommendations are text for you.
+
+## Your intervention
+
+- Read the daily email (2 minutes). Nothing needs a reply.
+- Open `state/monitor/reports/<date>.md` when System health is not healthy.
+- Read the Saturday audit email; accept a proposed change only after running its backtest check.
+- If the kill switch fires you get an alarm. The 15% switch resumes by itself after 20 sessions (the email names the
+  date); `--resume` restarts sooner. The 25% hard floor needs `--resume --reset-hwm`.
+- To stop everything: `launchctl unload` the three plists, then close positions in the Alpaca UI if desired.
+
+## Costs
+
+Alpaca: $0 commissions; the real cost is spread and slippage, roughly 5-15 bps per side on liquid names. Market
+data, news and options snapshots are on Alpaca's free tier; EDGAR, FRED, StockTwits and Finnhub are free.
+
+Claude API, measured from telemetry, 2026-10-20 to 10-31 (10 sessions, after the 2026-10-17 cost cuts): **$9.87,
+about $20 a month.**
+
+| Job | Calls | Share |
+|---|---|---|
+| Monitor | one `claude-opus-5` review a week plus hard-alarm days | 46% |
+| Desk | headline classifier (`claude-sonnet-5`), red team on buy candidates, analyst | 35% |
+| Audit | one `claude-opus-5` call a week | 18% |
+| Email | trade summaries on `claude-sonnet-5`, only on days something traded | <1% |
+
+The monitor raises an alarm at `budget.monthly_api_usd` ($25); it does not cap spending.
+
+## Research and backtests
 
 ### Evidence: what the numbers can and cannot tell you
 
-Four published results set how far to trust a backtest of this strategy. They are the reason for the trial
-log and the Deflated Sharpe line below every result.
+Four published results set how far to trust a backtest of this strategy. They are the reason for the trial log and
+the Deflated Sharpe line below every result.
 
 - **A backtest's Sharpe barely predicts live results; its drawdown and volatility do.** Across 888 Quantopian
-  strategies with at least 6 months of out-of-sample trading, backtest Sharpe explained under 2.5% of later
-  performance, while volatility and maximum drawdown carried real predictive value
-  ([Wiecki, Campbell, Lent & Stauth 2016](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2745220)).
-  *Here:* judge variants and the go-live decision on drawdown and volatility staying in their backtest range,
-  not on backtest return.
-- **Published return patterns decay.** Across 97 predictors from academic studies, portfolio returns were
-  about 26% lower out-of-sample and about 58% lower after publication
-  ([McLean & Pontiff 2016](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2156623)). Momentum is among the
-  most-published. *Here:* plan around well under half the backtest's return.
-- **The best of many tries is inflated by the trying.** The Deflated Sharpe Ratio corrects a Sharpe ratio for
-  the number of variants tested and for skewed, fat-tailed returns
-  ([Bailey & Lopez de Prado 2014](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551)). *Here:*
-  `desk/trials.py`, below.
-- **Momentum crashes in panics.** Its worst losses cluster after market declines, with volatility high, during
-  the rebound ([Daniel & Moskowitz 2016](https://www.nber.org/papers/w20439)). *Here:* the 2023-2026 window
-  contains no such episode. The point-in-time study below covers 2018-2026 on a universe that includes later
-  delistings: the regime gate and kill switch cut the 2020 and 2022 losses to about half the market's, and the
-  same caution missed the 2020 rebound.
+  strategies, backtest Sharpe explained under 2.5% of later performance, while volatility and maximum drawdown carried
+  real predictive value ([Wiecki, Campbell, Lent & Stauth 2016](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2745220)).
+  *Here:* judge variants on drawdown and volatility staying in their backtest range, not on backtest return.
+- **Published return patterns decay.** Across 97 predictors, returns were about 26% lower out-of-sample and about 58%
+  lower after publication ([McLean & Pontiff 2016](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2156623)).
+  Momentum is among the most-published. *Here:* plan around well under half the backtest's return.
+- **The best of many tries is inflated by the trying.** The Deflated Sharpe Ratio corrects a Sharpe ratio for the
+  number of variants tested and for skewed, fat-tailed returns
+  ([Bailey & Lopez de Prado 2014](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551)). *Here:* `desk/trials.py`.
+- **Momentum crashes in panics.** Its worst losses cluster after market declines, during the rebound
+  ([Daniel & Moskowitz 2016](https://www.nber.org/papers/w20439)). *Here:* the point-in-time study covers 2018-2026,
+  including the 2020 crash and the 2022 bear market.
+
+### Point-in-time robustness study (2018-2026)
+
+`backtest.py` runs on a frozen list of today's 800 most liquid names, so it only ever buys stocks that survived.
+`robustness.py` re-tests `config.yaml` on the names that were liquid *at the time*: each week, the live rule applied
+to every ticker the SEC listed since 2017 (94 monthly snapshots via the Wayback Machine) plus Alpaca's active and
+inactive assets. 2,618 names qualify at some point; 734 have since delisted or changed ticker (SVB and First Republic
+among them). The definition is committed as `state/history/pit/members.csv`; `scripts/build_pit_universe.py` rebuilds
+it and the ~300MB price panel. Variants are judged from four start dates a quarter apart, and a `frictions` mode
+samples the analyst's vetoes and the half-size rule at their live rates. Reports go to `state/robustness/<date>/`.
+
+**The owner's bar** for a change: median six-month excess return over SPY better in at least 3 of 4 starts in *both*
+windows (2018-2026 and 2023-2026), the 10th percentile no worse in 3 of 4, and median max drawdown no more than 1.5x
+today's.
+
+What the study found under v2.0 (2026-09-24, still the frame for reading every result):
+
+| v2.0 config | Return | CAGR | Max DD | Sharpe |
+|---|---|---|---|---|
+| Frozen survivors' list, 2023-09 to 2026-09 | +144% | +34.6% | -19.2% | 1.33 |
+| Same window, point-in-time names | +68% | +18.9% | -18.7% | 0.91 |
+| Point-in-time, 2018-01 to 2026-09 | +85% | +7.4% | -27.7% | 0.46 |
+| SPY, 2018-01 to 2026-09 (no dividends) | +184% | +12.8% | -34.2% | 0.74 |
+
+- **About half the frozen-list return is survivor bias.** Same code, prices and window; only the universe differs.
+- **v2.0 trailed SPY over the long run** (it beat SPY in 3 of 23 rolling 3-year windows) but limited crash losses:
+  -12% in the COVID crash (SPY -34%) and -10% in 2022 (SPY -25%), with a beta of 0.41.
+- **Costs dominate.** At 25 bps of slippage per side it earned 1.7% a year; at 50 bps it lost money.
+- **A single path is noise.** Removing seven exchange-traded notes that traded twice for a net $3 moved the 8.7-year
+  total from +72% to +85%.
+
+The 2026-11-01 quant review found that adding risk within the v2.0 design (bigger positions, wider drawdown limits)
+lost, and that slower, wider holding (v2.1) passed the bar under live frictions: 4/4 starts on median and p10 in
+2018-2026, 3/4 and 3/4 in 2023-2026. Its scripts are `scripts/check_quant_review_1101.py` and
+`scripts/check_cash_sweep_live.py`.
+
+### Reproducible backtests and the trial log
+
+`backtest.py` reads a frozen universe, `state/history/universe_bt.json` (800 names, built 2026-09-21, id `12be6539`),
+and prices saved on first download to `state/history/prices/`. The same command gives byte-identical output, and the
+first line of every result states the snapshot, its id, end date and data coverage - results with a different id or
+coverage are not comparable. Only `--rebuild-universe` / `--refetch-prices` change the inputs. Figures dated before
+2026-09-24 (anywhere in this repo) were measured on a universe that no longer exists; treat them as directional.
+
+**Judge a setting with `--stagger` or `robustness.py`, never one window.** A single path is dominated by when the kill
+switch happens to fire. The staggered windows share most of their path, so 6/6 is consistency, not six independent
+confirmations.
 
 **Trial log and Deflated Sharpe.** Every `backtest.py` run appends a record to `state/history/trials.jsonl`
-(committed): the variant's settings, window, universe id, data coverage, and the daily-return statistics the
-deflation needs. A variant is identified by a hash of every setting that changes a result, so re-running it
-never counts as a new trial, while any change to `config.yaml`'s strategy settings does. Each single run
-prints its Deflated Sharpe: the probability its edge is real, given how many variants have been tried (logged,
-plus `backtest.prior_untracked_trials` for any the log cannot see), how widely their Sharpes spread on the same
-window and universe, and the run's own skew and kurtosis. 0.95 is the usual bar.
-
-What the deflation does **not** fix: survivorship (the universe is today's survivors), a window with no bear
-market, fills approximated from daily bars, and an AI layer the backtest does not simulate. A high Deflated
-Sharpe here is a necessary condition, not a sufficient one.
-
-**Results** - regenerate with `python scripts/trials_report.py --write-readme` after testing variants:
+(committed): the variant's settings, window, universe, coverage and the return statistics the deflation needs. A
+variant is identified by a hash of every setting that changes a result, so re-running it never counts as a new trial.
+Each run prints its Deflated Sharpe: the probability its edge is real given how many variants have been tried, how
+widely their Sharpes spread, and the run's own skew and kurtosis. 0.95 is the usual bar. It does **not** fix fills
+approximated from daily bars or an AI layer the backtest does not simulate: a high Deflated Sharpe is necessary, not
+sufficient.
 
 <!-- trials:start -->
-_Generated from 109 logged runs (latest 2026-11-02 05:29 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `pit`, N = 107 trials._
+_Generated from 111 logged runs (latest 2026-11-02 05:56 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `pit`, N = 107 trials._
 
 | Variant | Deflated Sharpe | Return | Max DD | Sharpe | Runs |
 |---|---|---|---|---|---|
 | exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.cash-sweep {'enabled': True, 'band_pct': 0.02}, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.89 | +140% | -22.2% | 1.31 | 2 |
-| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.86 | +120% | -18.1% | 1.22 | 2 |
+| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.86 | +120% | -18.1% | 1.22 | 3 |
 | portfolio.correlation-days 120 | 0.73 | +70% | -18.7% | 0.92 | 1 |
 | facts.offering-block-backtest False | 0.72 | +68% | -18.7% | 0.91 | 1 |
 | portfolio.cash-sweep {'enabled': False} | 0.72 | +68% | -18.7% | 0.91 | 2 |
@@ -305,292 +374,92 @@ _Generated from 109 logged runs (latest 2026-11-02 05:29 UTC) by `scripts/trials
 | signals.weights {'momentum': 0.6, 'short': 0.15, 'low_vol': 0.25} | 0.32 | +11% | -19.3% | 0.29 | 1 |
 <!-- trials:end -->
 
-How to read it (as of 2026-09-24, N = 17; re-read the table above against this):
-- **The core edge survives the trial penalty; the choice among settings does not matter much.** Twelve of 16
-  variants sit between 0.93 and 0.98, and maximum drawdown clusters at -18% to -21% across nearly all of them -
-  the stable quantity, as the Quantopian study predicts. Differences inside that band are within the ~40-point
-  path noise measured with `--stagger`.
-- **Several 2026-09-12 conclusions do not reproduce.** On the old universe the current config was best; here the
-  0-day earnings block, 8 names at 15%, the ladder and notional sizing match or beat it. The earnings-window
-  calibration note above (5 days best) rests on the old-universe numbers.
-- **Do not switch to the top row on this evidence.** Picking the best of 17 is the selection bias the deflation
-  charges for; any change should first win a `--stagger` comparison and ideally a bear-market window.
-- **The clear losers are robust:** a 21-day earnings block, a forced pre-earnings exit, and zero tolerance for
-  correlated peers lose on every measure, as they did on 2026-09-12.
+How to read it: **nothing clears 0.95.** v2.1 (second row) leads the configurations that run live, at 0.86 against
+v2.0's 0.72; the top row adds the SPY cash sweep, which is backtest-only so far (decision due 2026-11-06). The
+"current: config.yaml" row is the last plain run of the config, logged under v2.0. Drawdown clusters at -16%
+to -22% across nearly every variant - the stable quantity, as the Quantopian study predicts. Choosing the best row is
+the selection bias the deflation charges for, so a change still has to pass the owner's bar on the point-in-time study.
 
+### Earlier experiments
 
-### Point-in-time robustness study (2018-2026)
-
-`backtest.py` runs on today's 800 most liquid names, so it only ever buys stocks that survived and grew.
-`robustness.py` re-tests `config.yaml` on the names that were liquid *at the time*: each week, the live rule
-(top 800 by 20-day dollar volume, traded price >= $5) applied to every ticker the SEC listed since 2017 (94
-monthly snapshots via the Wayback Machine) plus Alpaca's active and inactive assets. 2,618 names qualify at some
-point; 734 have since delisted or changed ticker (SVB and First Republic among them). The definition is committed
-as `state/history/pit/members.csv`; `scripts/build_pit_universe.py` rebuilds it and the ~300MB price panel.
-Same engine, three additions: weekly membership, a holding with no bar for 5 sessions closes at its last price,
-and random-entry / analyst-veto modes. Nothing it runs goes into the trial log.
-
-Results as of 2026-09-24 (full report: `state/robustness/<date>/report.md`):
-
-| | Return | CAGR | Max DD | Sharpe |
-|---|---|---|---|---|
-| Published baseline, today's 800, 2023-09 to 2026-09 | +144% | +34.6% | -19.2% | 1.33 |
-| Same window, point-in-time names | +68% | +18.9% | -18.7% | 0.91 |
-| Point-in-time, 2018-01 to 2023-09 (never used for tuning) | +20% | +3.2% | -27.7% | 0.27 |
-| Point-in-time, 2018-01 to 2026-09 | +85% | +7.4% | -27.7% | 0.46 |
-| Same, median of 4 start dates a quarter apart | | +4.9% | -32.1% | 0.34 |
-| SPY, 2018-01 to 2026-09 (no dividends) | +184% | +12.8% | -34.2% | 0.74 |
-
-How to read it:
-- **Most of the published return is survivor bias.** Same code, prices and window; only the universe differs.
-  The baseline row reproduces +143.8% exactly on the new price panel. Over 8.7 years, trades in names still on
-  today's list made $11,611, while trades in names that later dropped off lost $3,692.
-- **The long-run config trails SPY:** it beat SPY in 3 of 23 rolling 3-year windows and lost money in 6. The
-  ranking beats 88% of 40 random-entry runs that use the same rules (p ~ 0.15), and the Deflated Sharpe is 0.72.
-  Neither clears the usual bar.
-- **It limits crash losses:** -12% in the COVID crash (SPY -34%) and -10% in the 2022 bear market (SPY -25%),
-  with a beta of 0.41. The kill switch fired 7 times and the hard floor twice in 8.7 years.
-- **One rule helps on nearly every start date:** cash below the SPY 200-day MA (`regime.off_liquidate`) gave
-  7.6% a year against 4.9% (better on 3 of 4 start dates) with a max drawdown of -22.5% against -32% (better on
-  all 4). That is the revisit `config.yaml` asked for
-  once a bear market was available. Lower-turnover neighbors (15 positions, decay rank 60, min hold 20) also
-  beat the config in 3-4 of 4 starts. Treat these as leads to test, not as results: choosing among them is a
-  new trial.
-- **Costs dominate.** At 25 bps of slippage per side it earns 1.7% a year; at 50 bps it loses money. Analyst
-  vetoes at the live rates, applied at random, cut the 8.7-year return from +85% to +33%.
-- **A single path is noise.** Removing seven exchange-traded notes that traded twice for a net $3 moved the
-  8.7-year total from +72% to +85%. The study therefore judges variants from four start dates.
-
-Caveats: earnings dates start in June 2023 (before then the earnings block is inert); prices are not
-dividend-adjusted and cash earns nothing; the analyst and red team are not simulated.
-
-### Aggression levers
-
-Tested 2026-09-24 on the frozen snapshot, `--stagger 6`:
-
-| Setting | Won on return | Median vs base | Won on drawdown | Won on Sharpe | Verdict |
-|---|---|---|---|---|---|
-| `risk_per_trade_pct` 1% -> 1.25% | 6/6 | +34.8 pts (+9.7 to +53.6) | 4/6 | 4/6 | candidate, not adopted |
-| `target_positions` 12 -> 15 | 2/6 | -15.9 pts (-30.7 to +40.9) | 2/6 | 1/6 | rejected |
-
-15 positions spreads the same cash across more, smaller positions and adds names from whatever theme is already
-leading. 1.25% is consistent but has three reasons for caution before it goes live: the average position only
-grows from 7.6% to 7.8% of equity (the 10% cap and cash bind first, so the gain is not simply "more invested");
-a good part of the edge comes from the kill switch firing sooner, and the backtest auto-resumes 20 trading days
-after a halt while live waits for a manual `--resume`, so halt-timing effects may not transfer; and full-book
-open risk becomes 12 x 1.25% = 15%, the kill-switch level itself.
-
-Tested 2026-09-12 on the old universe (baseline then +247% / DD -20.5% / Sharpe 1.78) - **not comparable to the
-table above; re-test with `--stagger` before relying on any of them**: trailing stop instead of the 3R target
-(+130% at 2xATR, +141% at 3x - the target limit fills the intraday spike, a trail exits the pullback),
-pyramiding (+115%), regime ladder (+192%), cash below the 200-day (+181%, DD -16.3%: the one rule whose payoff a
-bull-market window cannot show), no entry pacing (+104%, DD -27.7%, six hard-floor hits - batch entries share one
-day's gap risk), ATR filter 12% (+155%), 8 names at 15% (+203%), $5M-volume universe (+53%). Within one universe
-a single window swings by roughly 40 points on path alone (15 positions ranged -31 to +41 across staggered
-starts), so the large gaps - pacing, pyramiding, trailing stops, the ATR filter, the $5M universe - probably
-survive a re-test, and the small ones - 8 names at 15%, the ladder, cash below the 200-day - may not. Each
-result sits in the comment next to its key. The features stay wired so live data can re-open any of them:
+Wired in code and off, each with its result in the comment next to its key in `config.yaml`. Most were measured on the
+old universe (2026-09-12) and need a `--stagger` re-test before relying on them: trailing stop instead of the 3R target,
+pyramiding, the regime ladder, cash below the 200-day MA (`regime.off_liquidate` - the one rule that helped on nearly
+every point-in-time start, 7.6% a year against 4.9% under v2.0), no entry pacing (deeper drawdowns: batch entries share
+one day's gap risk), a looser ATR filter, 8 names at 15%, and a $5M-volume universe (thin names win the ranking and
+lose the trade). Higher risk per trade (1.25%) won on return in 6/6 staggered starts but mostly by tripping the kill
+switch earlier; it was not adopted.
 
 ```bash
 .venv/bin/python backtest.py --start 2023-09-11 --trail-atr 2 --take-profit 0 --pyramid-adds 2 --tag x
 .venv/bin/python backtest.py --start 2023-09-11 --ladder --off-liquidate --tag y
-.venv/bin/python backtest.py --start 2023-09-11 --min-dollar-volume 5000000 --max-symbols 1500 --tag z
+.venv/bin/python backtest.py --start 2024-03-01 --sizing notional --tag nt
 ```
 
-### Two calibration notes worth keeping
-
-**Earnings window.** A 15-60 day hold will usually span an earnings report - that is not a bug, it is where
-the money is. Over three years of history (state/history/earnings.csv), the trades that held through a report
-produced 75% of all profit (median +5.9%); trades that avoided one had a negative median. The entry block
-exists only to keep a day-old stop from being gapped over: backtested at 0/5/21 days it returned
-+213% / +247% / +84% with Sharpe 1.65 / 1.78 / 0.96, so it is set to 5. (2026-09-12, old universe: the 21-day
-shortfall is far outside path noise; 0 vs 5 days is not, and deserves a `--stagger` re-test.) A forced exit
-before the report was tested and rejected (+71%, worst drawdown, hit the hard floor twice); it stays wired in at
-`exits.earnings_exit_days_before: 0`. The two rules count days differently, on purpose: the pre-report *exit*
-counts trading days (calendar days would miss a Monday report), while the *entry block* counts calendar days in
-both the live run and the backtest, which is how the value 5 was calibrated. Five calendar days is three to four
-trading days, so on a Tuesday a report the following Monday (six calendar days out) is not blocked. Switching the
-block to trading days would make it stricter and needs its own `--stagger` test first.
-
-**Finnhub's bulk calendar truncates at 1500 rows** and returns the far end of the requested range, so a wide
-date query silently reports no upcoming earnings for every symbol. `desk/facts.py` queries one symbol at a
-time for this reason. Do not "optimize" it back into a single range request.
-
-## Schedule it
+The regime gate is backtested automatically (SPY + FRED VIX history). The earnings block and the insider tilt need
+history files first (`backtest.py` logs which features are active):
 
 ```bash
-for p in daily report weekly-audit; do
-  sed "s|__PROJECT_DIR__|$(pwd)|g" launchd/com.alpaca-desk.$p.plist > ~/Library/LaunchAgents/com.alpaca-desk.$p.plist
-  launchctl load ~/Library/LaunchAgents/com.alpaca-desk.$p.plist
-done
+.venv/bin/python scripts/build_earnings_history.py --start 2023-01-01   # -> state/history/earnings.csv
+.venv/bin/python scripts/build_insider_history.py  --start 2023-01-01   # -> state/history/insider.csv (slow: EDGAR at 10 req/s)
 ```
 
-**Allow them in the background.** macOS loads these jobs at login only if they are switched on under System
-Settings > General > Login Items & Extensions > Allow in the Background, where they appear as `teamrobo-desk`,
-`teamrobo-email` and `caffeinate` (the weekly audit). The desk and email jobs run the scripts in `launchd/` for
-that reason: as inline `/bin/sh -c` commands both were listed as "sh", were switched off, and after a restart on
-2026-09-27 neither loaded, so 09-28 had no desk run or email until they were started by hand. After any restart,
-`launchctl list | grep alpaca-desk` should show all three.
+Bar panels are cached under `state/cache`, keyed by fetch date, and pruned after `data.cache_retention_days` (2).
 
-**How a run knows it was scheduled.** Each plist sets `TEAMROBO_JOB` to its label, and telemetry records a run as
-`launchd` only when that is present. launchd's own `XPC_SERVICE_NAME` does not survive the scripts: Python sees
-`0`, and on 2026-09-30 every scheduled run was recorded as manual. Reinstall the plists with the loop above after
-changing them. Every `run_start` also records `launched_via`, the process chain (`Python<sh<launchd` when scheduled).
+### Calibration notes worth keeping
 
-**When the schedule slips.** A desk run that finishes after 14:00 (the Mac was asleep at 13:40, or the email job
-never fired) sends the day's email itself: one email job runs at a time and `report_daily.py` sends at most one
-email a day (`state/reports/<date>.sent`; `--resend` overrides). Every job checks at start that all three jobs are
-loaded and that the 13:40 wake is scheduled - a problem appears as a MANUAL ACTION in the brief and the email, a
-SEV1 in the monitor, and an alert email from the Saturday audit. A scheduled start more than 10 minutes late is
-recorded as `slot_deferred`, and a weekday slot with no scheduled start within 3 hours as `slot_missed`.
+**Earnings window.** A long hold will usually span an earnings report - that is where much of the money is: trades
+that held through a report produced 75% of all profit. The entry block exists only to keep a fresh stop from being
+gapped over, and is set to 5 calendar days (a 21-day block lost badly; 0 vs 5 is within noise). A forced exit before
+the report was tested and rejected; it stays wired at `exits.earnings_exit_days_before: 0`. The pre-report *exit*
+counts trading days; the *entry block* counts calendar days, which is how 5 was calibrated - so on a Tuesday, a report
+the following Monday is not blocked.
 
-**launchd schedules use the Mac's local time.** This Mac is on Pacific time, so the desk job's plist says 13:40
-to run at 16:40 ET, 40 minutes after the close, the same minute pmset wakes the Mac. At 13:45 it missed that
-wake: the Mac slept again 94 seconds after waking and the run waited for the next wake at 13:57 (2026-10-01). (From 2026-09-17 to 09-24 it said 16:45, which meant 19:45 ET:
-the desk ran after the 14:00 email, and every email in that stretch described the previous evening's run
-without its notes. On a machine in another zone, convert before editing.)
-
-The 14:00 local job runs the agent monitor first (below), then `report_daily.py`, which emails the day's activity:
-results, orders working for the next open, notable moves and news, performance against SPY (since
-inception, week, month, YTD), and any change to config or code since the last report (`state/fingerprint.json`).
-It never submits or cancels an order. Mail needs `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` (+ optional
-`SMTP_PORT`, `REPORT_FROM`) or `RESEND_API_KEY` in `.env`; with neither it still writes `state/reports/`.
-
-Each buy and sell carries a one- or two-sentence plain-English explanation. `report.summary_model`
-paraphrases the analyst's own wording into it; the call has no trading authority and its output is
-display-only text. Any failure - no key, API down, a refusal - falls back to sentences built from the
-structured fields (`fallback_summary`), so a trade is never shown without a reason under it. Blank the key
-to use those templates always.
-
-**The balance in the email will not match Alpaca exactly.** At 14:00 local the machine is an hour past the
-16:00 ET close, and after-hours trading keeps moving the marks, so the emailed equity is a live snapshot
-rather than the official close - a few dollars either way on seven positions. The email states its own
-snapshot time for this reason. Cash matches to the penny; only position marks drift.
-
-**launchd does not wake a sleeping Mac**, and this one sleeps after a minute idle. A single
-`pmset repeat wakeorpoweron` event at 13:40 starts the desk job, which holds the machine awake for 20 minutes
-after it finishes, and at least until 14:50 (`caffeinate -i` at the end of `launchd/teamrobo-desk`), to carry it
-through the 14:00 report and the start of the 14:30 health review (a Claude app scheduled task). The Saturday
-audit has no wake of its own and runs whenever the Mac is next awake - harmless, it only reads.
-
-The Mac must be awake at 16:45 ET. Orders placed after the close queue for the next open; time-based exits and
-the kill switch only evaluate when the job runs, so a missed day delays them by a day (stops and targets sit at
-the broker and are unaffected). launchd starts a missed job when the Mac next wakes: if that is before 16:20 ET
-on a session day, the run is protect-only (sync, kill switch, stop check; no exits or entries) and the evening
-run decides. For a machine-independent schedule, run it from a cloud scheduler instead.
-
-### Agent reliability monitor
-
-Every job run and every Claude call is recorded as one line of JSON in `state/telemetry/<date>.jsonl`
-(`desk/telemetry.py`): run start and end with status and outcome fields, each call's role, model, tokens,
-cost, latency and outcome, what each AI role returned against what it was asked (symbols answered, symbols
-skipped or invented, contract breaks such as an over-long brief), and every WARNING or ERROR log line. Secrets
-are redacted before anything is written; a telemetry failure never affects a run.
-
-`monitor.py` runs first in the 14:00 weekday job and reviews everything since its previous run:
-
-- **Code computes, Claude interprets.** `desk/monitor.py` works out expected against actual runs from the
-  installed launchd schedules and the market calendar, golden signals per AI role against a 7-day baseline
-  (median, p95, MAD; days with a SEV1/SEV2 excluded), error and brief-note signatures with new ones flagged,
-  and config/code/schedule changes. Claude receives those numbers with `agent-monitor-prompt.md` as its
-  instructions (its Configuration block is filled from `config.yaml`'s `monitor` section) and writes the report.
-- **Hard alarms do not depend on the model.** SEV1 in code: a desk run missed on a trading day, crashed, or
-  started and never finished; a holding the desk reported without a verified broker-side stop; a kill-switch
-  halt; a daily report that did not run, crashed, or whose email failed. Each scheduled slot is judged once, by
-  the first monitor run after it is 10 minutes old (desk) or 60 minutes old (report), so a missed 13:40 desk run
-  is escalated at 14:00 the same day. If the Claude call fails, a deterministic fallback report is still
-  written and the alarms still escalate.
-- **Output.** The full report goes to `state/monitor/reports/<date>.md`; the daily email carries a "System
-  health" section (status, findings, open recommendations), and says so when the monitor did not run. SEV1 is
-  also emailed at once, one email per underlying problem. Open findings, recommendations, baselines' excluded
-  days and escalations persist in `state/monitor/state.json`.
-- **Read-only.** It never touches orders, positions, config or code; recommendations are text for you.
-- Runs scheduled before telemetry existed (2026-09-24) are reported as unverifiable, not as missed.
-
-```bash
-.venv/bin/python monitor.py --print     # analyze and print, save and send nothing
-.venv/bin/python monitor.py --no-llm    # signals and the fallback report only, no Claude call
-```
-
-## Your intervention
-
-- Read the daily brief (2 minutes). Nothing needs a reply.
-- Glance at the email's System health section; open `state/monitor/reports/<date>.md` when it is not healthy.
-- Read the Saturday audit email; accept a proposed change only after running its backtest check.
-- If the kill switch fires you get a message; nothing trades again until you run `--resume`.
-- To stop everything: `launchctl unload` both plists, then close positions in the Alpaca UI if desired.
-
-## Costs
-
-Alpaca: $0 commissions; real cost is spread and slippage, roughly 5-15 bps per side on liquid names. Market data,
-news, and options snapshots are on Alpaca's free tier. EDGAR, FRED, and StockTwits are free. Finnhub free tier.
-Claude: three calls per trading day (headline classifier, red team, analyst) plus one weekly audit -
-roughly $1-3/day on `claude-opus-5`; set the `*_model` keys to `claude-sonnet-5` to cut that by ~60%.
-The report's plain-English trade summaries add a fourth call, but only on days something traded, and it is
-a short paraphrase on `claude-sonnet-5` - around a cent. The agent monitor adds one `claude-opus-5` call per
-weekday: the first run read 15.6k tokens and wrote 17.4k (reasoning included), $0.51 - about $11 a month. The
-monitor's own telemetry reports the real figure every day.
+**Finnhub's bulk calendar truncates at 1500 rows** and returns the far end of the requested range, so a wide date
+query silently reports no upcoming earnings for every symbol. `desk/facts.py` queries one symbol at a time for this
+reason. Do not "optimize" it back into a single range request.
 
 ## Known limitations
 
-- **`backtest.py` is an upper bound, by about half.** Its universe is a frozen snapshot of names that were liquid
-  on 2026-09-21. On names that were liquid at the time, the same 3-year baseline falls from +144% to +68%, and
-  8.7 years return 5-7% a year (see "Point-in-time robustness study"). Fills are approximated from daily OHLC and
-  the red team / analyst vetoes are not simulated. Live, the analyst cut over half the entries in the first two
-  weeks, so live trading runs at well under the risk the backtest assumes.
-- **The backtest's kill switch resumes by itself.** After a halt it sits out 20 trading days
-  (`--halt-cooldown-days`) and starts again; live waits for you to run `--resume`. It fired three times in
-  three years on the baseline, so expect roughly one halt a year, and treat any result that depends on halt
-  timing as optimistic.
-- **An analyst REDUCE on a name already held is a note, not a trade or an action item.** The holding keeps
-  its stop, target and decay rule, as in the backtest. The concern goes into the brief once, the first run
-  it is raised (`analyst concern on X (held; no trade ...)`), and is kept on the position as `analyst_flag`;
-  a later KEEP clears it. Until 2026-09-25 it was a MANUAL ACTION every run, which put the same advisories
-  under "Needs your action" daily. Entries are still cut before purchase as normal. Trimming holdings
-  automatically would need a partial-exit path that resizes the broker-side stop, and a backtest first:
-  the robustness study found no evidence the analyst's vetoes add return.
-- **Filing and news screens only look back 90 days.** A dilution filing older than that stops blocking the
-  name: DELL was blocked 2026-09-14 on an 8-K 3.02 dated 2026-06-17 and bought on 09-16 when it aged out.
-  Intentional (a June raise should not veto a September entry forever), but the block is a window, not a memory.
-- **FRED is unreachable from some networks**, and the VIX half of the regime gate fails silently when it is
-  (it did for the first three live sessions). `desk/regime.py` falls back to Yahoo; check the brief says
+- **`backtest.py` is an upper bound, by about half.** Its universe is a frozen list of survivors; use
+  `robustness.py` for anything that informs a decision. Fills are approximated from daily OHLC.
+- **The AI layer is not backtested.** The red team and analyst vetoes are only sampled at random in
+  `robustness.py`'s frictions mode; the shadow book is collecting the live evidence.
+- **Filing and news screens only look back 90 days.** An older dilution filing no longer flags the name.
+- **FRED is unreachable from some networks.** `desk/regime.py` falls back to Yahoo for VIX; check the brief says
   `VIX <number>` and not `VIX None`.
-- **StockTwits is an undocumented public endpoint** and may rate-limit or change; the z-score needs ~15 days of
-  the system's own history per name before it activates. Failures degrade to "no social data".
+- **StockTwits is an undocumented public endpoint** and may rate-limit or change; the z-score needs ~15 days of the
+  system's own history per name before it activates. Failures degrade to "no social data".
 - **Options IV needs a listed chain** 20-50 days out; names without options get no IV adjustment.
-- **Whole shares only.** Alpaca bracket orders do not support fractional shares, so names above ~$800 are
-  skipped at $10k equity.
-- **Short-term capital gains.** 15-60 day holds are taxed as ordinary income; wash sales are not tracked.
-- **Pattern day trader rule.** Under $25k equity, same-day round trips are limited. The scheduled run sells
-  after the close, so its exits fill next session and cannot complete one. A run launched while the market is
-  open defers the exit of anything whose fill it first saw that day once the day-trade count is used up. The
-  kill switch ignores the guard, and a stop firing on entry day counts against you.
-- **A run launched before the day's bars are final only protects.** launchd starts a missed job when the Mac
-  next wakes. If the market is open, or it is before 16:20 ET, the run syncs with the broker, applies the kill
-  switch and checks every stop, and makes no exits or entries (`PROTECT-ONLY RUN` in the brief): signals would
-  read a partial day and exits would fill at once instead of at the next open. `--force` runs everything anyway
-  and the brief warns that the bar is partial. The bar cache never hands a partial panel to the evening run: a
-  cached panel is reused only if fetched after the latest 16:20 ET.
+- **Whole shares only.** Alpaca bracket orders do not support fractional shares, so at a 7% cap on ~$9k equity,
+  names above ~$630 cannot be bought.
+- **Taxes.** 21-126 day holds are short-term gains; wash sales are not tracked.
+- **Pattern day trader rule.** Under $25k equity, same-day round trips are limited. The scheduled run sells after the
+  close, so its exits cannot complete one; a run launched during market hours defers such exits once the day-trade
+  count is used. The kill switch ignores the guard.
+- **A run before the day's bars are final only protects** (`PROTECT-ONLY RUN` in the brief); `--force` runs
+  everything anyway and the brief warns that the bar is partial.
 - **A config.yaml typo stops the run.** Every risk and sizing key is required at load (`desk/config.py`), and
   `account.paper` must be true: no code path builds a live trading client.
 
 ### Live against the backtest
 
-Every rule that differs between `run_daily.py` and `run_backtest`. None is fixed in code, because fixing any of
-them changes either live trading or the frozen baseline; each is a decision for the owner.
+Every rule that differs between `run_daily.py` and the backtest. None is fixed in code, because fixing any of them
+changes either live trading or the frozen baseline; each is a decision for the owner.
 
 | Rule | Live | Backtest | Effect |
 |---|---|---|---|
-| Kill switch recovery | halts until `--resume` | resumes after 20 sessions (hard floor: 60, then re-baselines) | halt timing is optimistic in the backtest |
-| Analyst, red team, implied-vol half size, offering / headline / social blocks | applied | not simulated (robustness.py's `frictions` samples them at random) | live runs smaller and more selective |
-| Exit fill | decided at 16:45 ET, market sell fills at the next open | time, decay, regime and switch exits fill at that day's close | one overnight gap per exit |
-| Hold clock (min 15 / max 60 days, decay eligibility) | counts from the day the entry was staged, the evening before the fill | counts from the fill | live reaches each limit one session early (three days for a Friday order); `hold_days` in trades.csv is one day long |
-| Stop and target | set from the signal close when the order is staged | recomputed from the actual fill | after a gap at the open, live risk per share differs from the 1% budget |
-| Entry pacing (4/day) | applied to sized entries: a pick that cannot be sized is replaced by the next | applied to picks before sizing | the backtest can buy fewer names on a day |
-| Earnings block boundary | report 0-5 calendar days out (a report today blocks) | 1-5 days out | live is one day stricter |
-| Fact-checked pool | only the top 30 non-held eligible names can be bought | earnings checked for the top 60 eligible names; anything eligible can be bought | the backtest can reach further down the ranking |
-| VIX | FRED's series, usually one session behind | that day's close | the backtest's regime flips a day sooner |
-| Holding with no bars | kept (broker decides) | sold at its last close after 5 sessions | backtest flatters delistings (robustness.py lists them) |
+| Kill switch, 15% | resumes after 20 sessions, or sooner with `--resume` | resumes after 20 sessions | the same unless you resume early |
+| Kill switch, 25% floor | halts until `--resume --reset-hwm` | resumes after 60 sessions, then re-baselines | the backtest is optimistic after a floor hit |
+| Analyst, red team, implied-vol half size, headline / social blocks | applied | not simulated (`robustness.py --frictions` samples them) | live runs smaller and more selective |
+| Exit fill | decided at 16:40 ET, market sell at the next open | time, decay, regime and switch exits fill at that day's close | one overnight gap per exit |
+| Hold clock (min 21 / max 126 days) | counts from the day the entry was staged | counts from the fill | live reaches each limit one session early |
+| Stop | set from the signal close, moved to the fill on the next run | computed from the fill | one evening at the signal-close distance |
+| Entry pacing (4/day) | applied to sized entries | applied to picks before sizing | the backtest can buy fewer names on a day |
+| Earnings block boundary | report 0-5 calendar days out | 1-5 days out | live is one day stricter |
+| Fact-checked pool | only the top 30 ranked candidates get fact sheets and can be bought | earnings checked for the top 60; anything eligible can be bought | the backtest can reach further down the ranking |
+| VIX | FRED, usually one session behind | that day's close | the backtest's regime flips a day sooner |
+| Holding with no bars | kept (the broker decides) | sold at its last close after 5 sessions | the backtest flatters delistings |
 | Final gate, cash | `enforce_entry_limits`, non-marginable buying power | neither | cannot bind at the configured target |
-| Guards | stale-data, day-trade, trading-day, protect-only before 16:20 ET, no entries without fact sheets or an earnings calendar, risk-off target when the regime feed fails | none | live skips or softens some days |
+| Guards | stale data, day trades, trading day, protect-only before 16:20 ET, no entries without fact sheets or an earnings calendar | none | live skips or softens some days |
 | Earnings dates | Finnhub, per symbol | yfinance history from June 2023 | block inert before mid-2023 in the backtest |
