@@ -7,10 +7,10 @@ from desk import state as state_mod
 from tests.test_run_daily import wired  # noqa: F401  (fixture)
 
 
-def test_the_release_helper_reads_the_config(cfg):
+def test_the_release_helper_reads_the_config(live_cfg):
     from desk.config import release
-    r = release(cfg)
-    assert r["name"] == "v2.0" and r["since"] == date(2026, 10, 16)
+    r = release(live_cfg)
+    assert r["name"] == "v2.1" and r["since"] == date(2026, 10, 30)
     assert release({}) == {"name": None, "since": None}
 
 
@@ -47,10 +47,11 @@ def test_a_v2_run_stages_positions_and_the_brief_under_the_release(wired, cfg): 
     holder["broker"] = FakeBroker()
     run(["--no-analyst"])
     st = json.loads(state_mod.STATE_FILE.read_text())
-    assert st["positions"] and all(p["release"] == "v2.0" for p in st["positions"].values())
-    assert sent[-1].splitlines()[0].endswith("v2.0")
+    name = cfg["release"]["name"]
+    assert st["positions"] and all(p["release"] == name for p in st["positions"].values())
+    assert sent[-1].splitlines()[0].endswith(name)
     book = [json.loads(x) for x in (state_mod.STATE_DIR / "shadow" / "book.jsonl").read_text().splitlines()]
-    assert book and all(r["release"] == "v2.0" for r in book)
+    assert book and all(r["release"] == name for r in book)
 
 
 def test_the_shadow_and_parity_sections_show_the_release():
