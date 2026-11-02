@@ -268,6 +268,18 @@ parity:                        # desk/parity.py: the backtest replayed over the 
                                # First run 2026-10-17 (09-12..10-16): live -6.4%, backtest -2.5%, SPY -0.1%; cash
                                # 50% vs 22%; 22 entries matched, 6 backtest-only (3 were the dilution block), 10 live-only
 
+governance:
+  stop_rule:                   # quant review 2026-11-01. The desk's alternative is a momentum ETF, not cash: the release
+    benchmark: SPMO            # is judged against SPMO (price, Alpaca bars - no dividends on either side) and SPY, from
+    warn_on: 2027-04-30        # release.since. REVIEW (owner looks again) on or after warn_on if the desk trails
+    warn_trail_pts: 20         # SPMO by > warn_trail_pts; STOP (replace the stock picker with SPMO; owner decides)
+    decide_on: 2027-10-29      # on or after decide_on if it trails SPMO by > stop_trail_pts AND trails SPY.
+    stop_trail_pts: 15         # Calibrated on v2.1's own backtest (24 starts, 2018-26 and 2023-26): over 7 months it
+                               # trails SPMO by > 20pt 8% of the time; over 12 months by > 15pt 19% of the time - the
+                               # false-stop rate accepted if the backtest is right. Its median over 12 months is -3.4pt
+                               # vs SPMO (+3.9 vs SPY): at best the desk matches the ETF, so the burden is on the desk.
+                               # Checked weekly by the audit (audit.stop_rule_status, from parity.since_release).
+
 budget:
   monthly_api_usd: 25          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). An alarm,
                                # not a cap. Keep the Anthropic Console limit at or above this: at the Console limit every

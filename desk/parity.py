@@ -279,6 +279,16 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
                  "live_return": round(live_last / float(eq["equity"][eq.index <= cut].iloc[-1]) - 1, 4),
                  "backtest_return": round(bt_last / float(bt_eq[bt_eq.index <= cut].iloc[-1]) - 1, 4),
                  "spy_return": round(float(spy[spy.index <= pd.Timestamp(end)].iloc[-1] / s_cut - 1), 4)}
+        bench = ((cfg.get("governance") or {}).get("stop_rule") or {}).get("benchmark")
+        if bench:
+            # The stop rule's yardstick (governance.stop_rule): a lens, never a reason the replay fails.
+            try:
+                b = cached_bars(data, [bench], days, cfg, tag=f"parity-{bench.lower()}")["close"][bench].dropna()
+                since["benchmark"] = bench
+                since["benchmark_return"] = round(float(b[b.index <= pd.Timestamp(end)].iloc[-1]
+                                                        / b[b.index <= cut].iloc[-1] - 1), 4)
+            except Exception as e:
+                since["benchmark_error"] = f"{type(e).__name__}: {e}"
     return {"window": f"{start} to {end}", "live_return": round(live_last / capital - 1, 4),
             "backtest_return": round(bt_last / float(bt_eq.iloc[0]) - 1, 4), "spy_return": round(spy_ret, 4),
             "equity_gap_pts": round(100 * (live_last / capital - bt_last / float(bt_eq.iloc[0])), 2),
