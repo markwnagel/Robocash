@@ -347,6 +347,7 @@ monitor:                       # agent reliability monitor (monitor.py): runs we
     - "F-30 / R-41: measured - the classifier now counts unrelated headlines (cls_unrelated_headlines, feed news_classified); judge the filter's leak from that."
     - "F-33 / R-40: measured - earnings_date_conflict flags a next report within 45 days of the last results 8-K."
     - "R-42: applied - summarizer calls carry trades and input_chars."
+    - "F-53 / R-61: not a defect - Victoria's Secret & Co. changed its NYSE ticker from VSCO to VSXY on 2026-06-02 (8-K 2026-05-21); Alpaca lists VSXY as Victorias Secret & Co. and VSCO as not found. The analyst's concern came from the old ticker. A block on issuer mismatch would have stopped a valid entry; not built."
   window_hours: 24             # first run only; afterwards the window is "since the previous monitor run"
   baseline_days: 7
   agents:                      # SLOs are set only where a real contract exists; the rest is baseline-only
