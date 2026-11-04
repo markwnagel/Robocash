@@ -69,7 +69,8 @@ def test_the_gap_is_attributed_in_points_and_adds_up():
                                 {"symbol": "NTNX", "entry_date": d(9), "pnl": -50.0}])
     live_open = [("SN", {"entry_date": d(10), "entry_price": 20.0, "last_price": 21.0, "qty": 10})]
     bought = pd.DataFrame([{"date": d(1), "symbol": "TEAM"}, {"date": d(9), "symbol": "NTNX"}, {"date": d(10), "symbol": "SN"}])
-    a = parity.attribute(log, bt_trades, last, live_closed, live_open, bought, {"MRNA"}, dates, 10000.0, gap_pts=-5.4)
+    book = pd.DataFrame([{"date": d(3), "kind": "blocked", "symbol": "MRNA", "reason": "headline: offering"}])
+    a = parity.attribute(log, bt_trades, last, live_closed, live_open, bought, book, dates, 10000.0, gap_pts=-5.4)
     assert a["matched_live"] == -1.5 and a["matched_backtest"] == 2.0 and a["matched_difference"] == -3.5
     assert a["backtest_only_gated"] == -1.0 and a["backtest_only_other"] == 2.0 and a["live_only"] == -0.4
     assert a["residual"] == round(-5.4 - ((-1.5 - 0.4) - (2.0 - 1.0 + 2.0)), 2)       # -0.5: fills, sizing, cash

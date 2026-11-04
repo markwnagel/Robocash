@@ -18,6 +18,6 @@ def test_the_same_names_gap_splits_into_size_and_return():
     live_open = [("GTLB", {"entry_date": d(3), "entry_price": 50.0, "last_price": 55.0, "qty": 20})]   # the same
     a = parity.matched_split(log, bt_trades, last, live_closed, live_open, {t: i for i, t in enumerate(dates)}, 10000.0)
     # TEAM: size (500 - 1000) x 20% = -100; return 500 x (-10% - 20%) = -150. GTLB: identical, 0.
-    assert a["matched_size"] == -1.0 and a["matched_return"] == -1.5 and a["matched_pairs"] == 2
+    assert a["matched_size"] == -1.0 and a["matched_return"] == -1.5 and a["matched_pairs"] == 2 and a["matched_split_total"] == -2.5
     assert a["matched_worst"][0]["symbol"] == "TEAM" and a["matched_worst"][0]["size_ratio"] == 0.5
     assert a["matched_size_ratio_median"] == 0.75

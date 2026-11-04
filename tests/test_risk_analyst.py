@@ -349,3 +349,23 @@ def test_the_red_team_is_never_called_with_nothing_to_review(monkeypatch):
     assert analyst.red_team({"holdings": [], "candidates": [], "held_symbols": ["AMD"]},
                             {"analyst": {"model": "m", "red_team_max_web_searches": 2}}) == {}
     assert calls == [] and events == [("red_team", 0, 0, {"skipped": "no symbols to review"})]
+
+
+def test_a_search_with_no_web_citation_is_recorded_by_name(monkeypatch):
+    """2026-10-30: two searches, 42,932 chars of results and 0 citations read as a possibly lost citation (F-31)."""
+    from desk import analyst
+    payload = {"holdings": [], "candidates": [{"symbol": "EXEL", "facts": {}}]}
+    case = {"symbol": "EXEL", "bear_case": "Gap.", "trap_type": "news-pop", "severity": 0.4,
+            "evidence": "earnings_date: 2026-10-29; iv_rv: 1.57"}
+
+    def fake(*a, **k):
+        analyst.LAST_CALL["web_searches"] = 2
+        return {"cases": [dict(case)]}
+    events = []
+    monkeypatch.setattr(analyst, "_call_json", fake)
+    monkeypatch.setattr(analyst.telemetry, "agent_output", lambda role, *a, **k: events.append(k))
+    analyst.red_team(payload, {"analyst": {"model": "m", "red_team_max_web_searches": 2}})
+    assert events[-1]["web_searches"] == 2 and events[-1]["web_searched_uncited"] is True
+    case["evidence"] += "; web: reuters.com, 2026-10-29"
+    analyst.red_team(payload, {"analyst": {"model": "m", "red_team_max_web_searches": 2}})
+    assert events[-1]["web_citations"] == 1 and events[-1]["web_searched_uncited"] is False
