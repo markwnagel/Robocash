@@ -215,6 +215,10 @@ def prompt_composition(payload: dict) -> dict:
             "prompt_fact_chars": sum(len(json.dumps(f, default=str)) for f in facts if f)}
 
 
+# Web searches the last _call_json made, so a role's agent_output can set its citations against them.
+LAST_CALL: dict = {}
+
+
 def _call_json(system: str, user_text: str, schema: dict, model: str, max_searches: int,
                role: str = "analyst", composition: dict | None = None, max_tokens: int = 16000) -> dict | None:
     """Returns None on ANY failure and never raises. The callers treat None as 'fail closed - no new
@@ -224,6 +228,7 @@ def _call_json(system: str, user_text: str, schema: dict, model: str, max_search
     tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": max_searches}] if max_searches > 0 else []
     messages = [{"role": "user", "content": user_text}]
     started, responses = time.monotonic(), []
+    LAST_CALL.clear()
     try:
         client = anthropic.Anthropic()
         for _ in range(6):
@@ -245,6 +250,7 @@ def _call_json(system: str, user_text: str, schema: dict, model: str, max_search
                                   **(composition or {}))
                 return None
             out = _parse("".join(b.text for b in resp.content if b.type == "text"))
+            LAST_CALL["web_searches"] = telemetry.usage_of(responses)["web_searches"]
             if resp.stop_reason == "max_tokens":
                 # Cut off mid-answer: the JSON cannot parse. Said as such, not as a parse error (audit 2026-10-17).
                 log.error("%s reply cut off at max_tokens (%d)", role, max_tokens)
@@ -307,13 +313,17 @@ def red_team(payload: dict, cfg: dict) -> dict:
             c["bear_case"] = f"{c.get('bear_case', '')} [web sources only - severity capped at {WEB_ONLY_SEVERITY_CAP}]"
             web_capped += 1
     sev = [float(c.get("severity", 0)) for c in cases.values()]
+    cites = web_citation_stats([str(c.get("evidence") or "") for c in cases.values()])
+    searches = LAST_CALL.get("web_searches")
+    # Searched but cited nothing: every case rests on the fact sheet and no web claim was made. Recorded by name so
+    # the monitor reads it as that, not as a lost citation (monitor F-31 / R-45, 2026-10-30).
     telemetry.agent_output("red_team", len(asked), len(set(cases) & asked),
                            unrequested=sorted(set(cases) - asked)[:10], missing=sorted(asked - set(cases))[:10],
                            severity_out_of_range=sum(1 for x in sev if not 0 <= x <= 1),
                            severity_median=sorted(sev)[len(sev) // 2] if sev else None,
                            high_severity=sum(1 for x in sev if x >= 0.7), crowded_unsupported=unsupported,
-                           web_only_capped=web_capped, web_undated_capped=undated_capped,
-                           **web_citation_stats([str(c.get("evidence") or "") for c in cases.values()]))
+                           web_only_capped=web_capped, web_undated_capped=undated_capped, web_searches=searches,
+                           web_searched_uncited=bool(searches) and not cites["web_citations"], **cites)
     return cases
 
 

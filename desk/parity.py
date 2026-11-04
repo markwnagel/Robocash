@@ -57,6 +57,39 @@ def earnings_seen(cache_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(sorted(rows), columns=["date", "symbol"])
 
 
+# A live gate explains a backtest-only entry only if it fired on the backtest's signal day (one session either side).
+# Matching a name's block from any date labelled EXEL, bought by the replay on 10-22 with its report 7 days out,
+# with a 10-26 "earnings in 3d" block (monitor F-45, 2026-10-30).
+GATE_DAYS = 1
+
+
+def gate_index(book: pd.DataFrame, pos: dict) -> dict:
+    """symbol -> [(trading-day index, 'kind: reason')] for every live block and analyst veto in the shadow book."""
+    out: dict = {}
+    for r in book.to_dict("records") if len(book) else []:
+        if r["kind"] in ("blocked", "analyst_remove"):
+            i = pos.get(pd.Timestamp(r["date"]))
+            if i is not None:
+                out.setdefault(r["symbol"], []).append((i, f"{r['kind']}: {str(r.get('reason') or '')[:60]}"))
+    return out
+
+
+def gate_near(gates: dict, sym: str, i: int, days: int = GATE_DAYS) -> str | None:
+    near = [(abs(j - i), why) for j, why in gates.get(sym, []) if abs(j - i) <= days]
+    return min(near)[1] if near else None
+
+
+def gate_class(why: str, offering_block: bool = False) -> str:
+    """retired: a rule live no longer applies (the dilution block, facts.offering_block false since 2026-10-19).
+    earnings: a current rule the replay applies too, so a gate here is a real mismatch (the replay blocks reports
+    1-5 days out, live 0-5). unsimulated: the analyst and the headline/social blocks, which the replay never runs."""
+    if why.startswith("blocked: dilutive filing"):
+        return "unsimulated" if offering_block else "retired"
+    if why.startswith("blocked: earnings"):
+        return "earnings"
+    return "unsimulated"
+
+
 def compare_entries(bt_entries: list, live_bought: pd.DataFrame, book: pd.DataFrame, dates: pd.DatetimeIndex,
                     last_day: str | None = None, tolerance: int = 5) -> dict:
     """Backtest entries are logged on their fill day, live rows on the signal (staging) day; both are compared on
@@ -76,10 +109,7 @@ def compare_entries(bt_entries: list, live_bought: pd.DataFrame, book: pd.DataFr
         if i is not None and r["date"] != last_day:
             live.append((i, r["symbol"]))
     live = sorted(set(live))
-    why = {}
-    for r in book.to_dict("records") if len(book) else []:
-        if r["kind"] in ("blocked", "analyst_remove"):
-            why.setdefault(r["symbol"], f"{r['kind']}: {str(r.get('reason') or '')[:60]}")
+    gates = gate_index(book, pos)
     used, lags, only_bt = set(), [], []
     for i, sym in sorted(bt):
         cands = [(abs(j - i), j) for j, s in live if s == sym and (j, s) not in used and abs(j - i) <= tolerance]
@@ -88,7 +118,7 @@ def compare_entries(bt_entries: list, live_bought: pd.DataFrame, book: pd.DataFr
             used.add((j, sym))
             lags.append(j - i)
         else:
-            only_bt.append((dates[i].date().isoformat(), sym))
+            only_bt.append((i, sym, gate_near(gates, sym, i)))
     # A live name re-staged on several days after a missed fill is one decision: count its first staging only.
     first_live = {}
     for j, sym in live:
@@ -97,78 +127,21 @@ def compare_entries(bt_entries: list, live_bought: pd.DataFrame, book: pd.DataFr
     only_live = sorted((dates[j].date().isoformat(), s) for s, j in first_live.items())
     total = len(lags) + len(only_bt) + len(only_live)
     # How much of the backtest-only side is a live gate the replay does not apply (a hard-filter block or an analyst
-    # veto), as opposed to a genuinely different pick - the monitor kept reading the whole gap as unexplained
-    # (R-50, R-53, 2026-10-21).
-    gated = sum(1 for _, s in only_bt if s in why)
+    # veto) on that day, as opposed to a genuinely different pick (R-50, R-53, 2026-10-21).
+    gated = sum(1 for *_, why in only_bt if why)
     return {"overlap": round(len(lags) / total, 3) if total else None, "both": len(lags),
             "match_tolerance_days": tolerance, "backtest_only_gated_live": gated,
             "backtest_only": len(only_bt), "live_only": len(only_live),
             "median_lag_days": float(pd.Series(lags).median()) if lags else None,
-            "backtest_only_names": [f"{d} {s}" + (f" ({why[s]})" if s in why else "") for d, s in only_bt][-10:],
+            "backtest_only_names": [f"{dates[i].date().isoformat()} {s}" + (f" ({why})" if why else "")
+                                    for i, s, why in only_bt][-10:],
             "live_only_names": [f"{d} {s}" for d, s in only_live][-10:]}
 
 
-def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live_closed: pd.DataFrame,
-              live_open: list, live_bought: pd.DataFrame, gated: set, dates: pd.DatetimeIndex, capital: float,
-              gap_pts: float, tolerance: int = 5) -> dict:
-    """The gap in percentage points, by cause (monitor R-58, 2026-10-22). Each entry is valued at its result -
-    a closed trade's P&L, an open one marked at the last close - and sorted: names both sides took (within
-    `tolerance` trading days), names only the backtest took because a live gate kept them out (`gated`), other
-    backtest-only names, and live-only names. What the entries do not explain - fills, slippage, the size of each
-    position, idle cash - is the residual."""
-    pos = {d: i for i, d in enumerate(dates)}
-    live_days = {}
-    for r in live_bought.to_dict("records"):
-        if pd.Timestamp(r["date"]) in pos:
-            live_days.setdefault(r["symbol"], []).append(pos[pd.Timestamp(r["date"])])
-    bt_days = {}
-    pnl_closed = {}
-    if len(bt_trades):
-        for r in bt_trades.to_dict("records"):
-            k = (r["symbol"], pd.Timestamp(r["entry_date"]))
-            pnl_closed[k] = pnl_closed.get(k, 0.0) + float(r["pnl"])
-    pts = {"matched_live": 0.0, "matched_backtest": 0.0, "backtest_only_gated": 0.0, "backtest_only_other": 0.0,
-           "live_only": 0.0}
-    near = lambda days, i: any(abs(j - i) <= tolerance for j in days)  # noqa: E731
-    for e in bt_entries:
-        i = pos.get(pd.Timestamp(e["date"]))
-        if not i:
-            continue
-        sig = i - 1
-        bt_days.setdefault(e["symbol"], []).append(sig)
-        k = (e["symbol"], pd.Timestamp(e["date"]))
-        v = pnl_closed[k] if k in pnl_closed else (float(last_close.get(e["symbol"], e["price"])) - e["price"]) * e["qty"]
-        if near(live_days.get(e["symbol"], []), sig):
-            pts["matched_backtest"] += v
-        elif e["symbol"] in gated:
-            pts["backtest_only_gated"] += v
-        else:
-            pts["backtest_only_other"] += v
-    rows = [(str(r["symbol"]), str(r["entry_date"]), float(r["pnl"])) for r in live_closed.to_dict("records")]
-    rows += [(s, str(p["entry_date"]), (float(p.get("last_price") or p["entry_price"]) - float(p["entry_price"]))
-              * float(p["qty"])) for s, p in live_open]
-    for sym, d, v in rows:
-        i = pos.get(pd.Timestamp(d))
-        if i is not None and near(bt_days.get(sym, []), i):
-            pts["matched_live"] += v
-        else:
-            pts["live_only"] += v
-    out = {k: round(100 * v / capital, 2) for k, v in pts.items()}
-    out.update(matched_split(bt_entries, bt_trades, last_close, live_closed, live_open, pos, capital, tolerance))
-    explained = (out["matched_live"] + out["live_only"]) - (out["matched_backtest"] + out["backtest_only_gated"]
-                                                           + out["backtest_only_other"])
-    out["matched_difference"] = round(out["matched_live"] - out["matched_backtest"], 2)
-    out["residual"] = round(gap_pts - explained, 2)
-    return out
-
-
-def matched_split(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live_closed: pd.DataFrame,
-                  live_open: list, pos: dict, capital: float, tolerance: int = 5) -> dict:
-    """The same-names gap split into position size and per-trade return (monitor R-59, 2026-10-23), with the
-    pairs that differ most. Each backtest entry is paired with the nearest live entry of that name within
-    `tolerance` trading days. size = (live dollars - backtest dollars) x the backtest's return; return = live
-    dollars x (live return - backtest return); together they are the pair's P&L difference."""
-    live = {}
+def live_positions(live_closed: pd.DataFrame, live_open: list) -> dict:
+    """(symbol, entry date) -> one live position: realized P&L of every closed part plus the open rest at its mark.
+    An open remainder used to replace a partial close instead of adding to it."""
+    live: dict = {}
     for r in live_closed.to_dict("records"):
         k = (str(r["symbol"]), str(r["entry_date"])[:10])
         a = live.setdefault(k, {"pnl": 0.0, "qty": 0.0, "px": float(r.get("entry_price") or 0), "exit": "", "exit_date": ""})
@@ -177,8 +150,19 @@ def matched_split(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Seri
         a["exit"], a["exit_date"] = str(r.get("exit_reason") or "")[:24], str(r.get("exit_date") or "")[:10]
     for s, p in live_open:
         px = float(p["entry_price"])
-        live[(s, str(p["entry_date"])[:10])] = {"pnl": (float(p.get("last_price") or px) - px) * float(p["qty"]),
-                                                "qty": float(p["qty"]), "px": px, "exit": "open", "exit_date": ""}
+        a = live.setdefault((s, str(p["entry_date"])[:10]), {"pnl": 0.0, "qty": 0.0, "px": px, "exit": "", "exit_date": ""})
+        a["pnl"] += (float(p.get("last_price") or px) - px) * float(p["qty"])
+        a["qty"] += float(p["qty"])
+        a["px"], a["exit"], a["exit_date"] = a["px"] or px, "open", ""
+    return live
+
+
+def pair_entries(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live: dict, pos: dict,
+                 tolerance: int = 5) -> tuple[list, list, set]:
+    """One pairing for the whole attribution: each backtest entry, in date order, takes the nearest unused live
+    position of that name within `tolerance` trading days. Returns (pairs, unpaired backtest entries), each
+    backtest side valued at its result - closed P&L, or an open one marked at the last close - and the set of
+    live positions used."""
     bt = {}
     if len(bt_trades):
         for r in bt_trades.to_dict("records"):
@@ -186,38 +170,112 @@ def matched_split(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Seri
             a = bt.setdefault(k, {"pnl": 0.0, "exit": "", "exit_date": ""})
             a["pnl"] += float(r["pnl"])
             a["exit"], a["exit_date"] = str(r.get("reason") or ""), str(r.get("exit_date") or "")[:10]
-    size = ret = 0.0
-    rows, used = [], set()
-    for e in bt_entries:
-        i = pos.get(pd.Timestamp(e["date"]))
-        if not i:
-            continue
-        sig = i - 1
+    pairs, unpaired, used = [], [], set()
+    for e in sorted((e for e in bt_entries if pos.get(pd.Timestamp(e["date"]))), key=lambda e: pd.Timestamp(e["date"])):
+        sig = pos[pd.Timestamp(e["date"])] - 1
+        day = str(pd.Timestamp(e["date"]).date())
+        b = bt.get((e["symbol"], day)) or {
+            "pnl": (float(last_close.get(e["symbol"], e["price"])) - float(e["price"])) * float(e["qty"]),
+            "exit": "open", "exit_date": ""}
+        b = dict(b, usd=float(e["price"]) * float(e["qty"]), px=float(e["price"]), day=day)
         near = [(abs(pos[pd.Timestamp(d)] - sig), (s, d)) for (s, d) in live
-                if s == e["symbol"] and (s, d) not in used and pd.Timestamp(d) in pos and abs(pos[pd.Timestamp(d)] - sig) <= tolerance]
-        if not near:
-            continue
-        k = min(near)[1]
-        used.add(k)
-        lv = live[k]
-        b_usd, l_usd = float(e["price"]) * float(e["qty"]), lv["px"] * lv["qty"]
-        if b_usd <= 0 or l_usd <= 0:
-            continue
-        b = bt.get((e["symbol"], str(pd.Timestamp(e["date"]).date()))) or {
-            "pnl": (float(last_close.get(e["symbol"], e["price"])) - float(e["price"])) * float(e["qty"]), "exit": "open", "exit_date": ""}
-        b_ret, l_ret = b["pnl"] / b_usd, lv["pnl"] / l_usd
-        size += (l_usd - b_usd) * b_ret
-        ret += l_usd * (l_ret - b_ret)
-        rows.append({"symbol": e["symbol"], "diff_pts": round(100 * (lv["pnl"] - b["pnl"]) / capital, 2),
-                     "size_ratio": round(l_usd / b_usd, 2),
-                     "entry_px_diff_pct": round(100 * (lv["px"] / float(e["price"]) - 1), 1),
-                     "live": f"{k[1]} {l_ret:+.1%} {lv['exit']} {lv['exit_date']}".strip(),
-                     "backtest": f"{pd.Timestamp(e['date']).date()} {b_ret:+.1%} {b['exit']} {b['exit_date']}".strip()})
+                if s == e["symbol"] and (s, d) not in used and pd.Timestamp(d) in pos
+                and abs(pos[pd.Timestamp(d)] - sig) <= tolerance]
+        if near:
+            k = min(near)[1]
+            used.add(k)
+            pairs.append({"symbol": e["symbol"], "sig": sig, "bt": b, "live": dict(live[k], day=k[1])})
+        else:
+            unpaired.append({"symbol": e["symbol"], "sig": sig, "bt": b})
+    return pairs, unpaired, used
+
+
+def split_pairs(pairs: list, capital: float) -> dict:
+    """The same-names gap split into position size and per-trade return (monitor R-59, 2026-10-23), with the pairs
+    that differ most. size = (live dollars - backtest dollars) x the backtest's return; return = live dollars x
+    (live return - backtest return). Per pair they sum to the P&L difference exactly; a pair with no recorded
+    size on either side puts its whole difference in return, so the split always adds up (R-60, F-52)."""
+    size = ret = 0.0
+    rows = []
+    for p in pairs:
+        b, lv = p["bt"], p["live"]
+        b_usd, l_usd = b["usd"], lv["px"] * lv["qty"]
+        diff = lv["pnl"] - b["pnl"]
+        if b_usd > 0 and l_usd > 0:
+            b_ret, l_ret = b["pnl"] / b_usd, lv["pnl"] / l_usd
+            s = (l_usd - b_usd) * b_ret
+            size, ret = size + s, ret + (diff - s)
+            ratio, px_diff = round(l_usd / b_usd, 2), round(100 * (lv["px"] / b["px"] - 1), 1)
+            live_s, bt_s = f"{l_ret:+.1%}", f"{b_ret:+.1%}"
+        else:
+            ret += diff
+            ratio = px_diff = None
+            live_s, bt_s = f"${lv['pnl']:+.0f}", f"${b['pnl']:+.0f}"
+        rows.append({"symbol": p["symbol"], "diff_pts": round(100 * diff / capital, 2), "size_ratio": ratio,
+                     "entry_px_diff_pct": px_diff,
+                     "live": f"{lv['day']} {live_s} {lv['exit']} {lv['exit_date']}".strip(),
+                     "backtest": f"{b['day']} {bt_s} {b['exit']} {b['exit_date']}".strip()})
     rows.sort(key=lambda r: r["diff_pts"])
-    return {"matched_size": round(100 * size / capital, 2), "matched_return": round(100 * ret / capital, 2),
+    ratios = [r["size_ratio"] for r in rows if r["size_ratio"] is not None]
+    total, m_size = round(100 * (size + ret) / capital, 2), round(100 * size / capital, 2)
+    return {"matched_size": m_size, "matched_return": round(total - m_size, 2), "matched_split_total": total,
             "matched_pairs": len(rows),
-            "matched_size_ratio_median": float(pd.Series([r["size_ratio"] for r in rows]).median()) if rows else None,
+            "matched_size_ratio_median": float(pd.Series(ratios).median()) if ratios else None,
             "matched_worst": rows[:5]}
+
+
+def matched_split(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live_closed: pd.DataFrame,
+                  live_open: list, pos: dict, capital: float, tolerance: int = 5) -> dict:
+    pairs, _, _ = pair_entries(bt_entries, bt_trades, last_close, live_positions(live_closed, live_open), pos, tolerance)
+    return split_pairs(pairs, capital)
+
+
+def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live_closed: pd.DataFrame,
+              live_open: list, live_bought: pd.DataFrame, book: pd.DataFrame, dates: pd.DatetimeIndex, capital: float,
+              gap_pts: float, tolerance: int = 5, offering_block: bool = False) -> dict:
+    """The gap in percentage points, by cause (monitor R-58, 2026-10-22), from one pairing of backtest entries with
+    live positions (pair_entries):
+      matched                pairs: live P&L vs the backtest's, split into size and return
+      backtest_only_unfilled live staged the name within `tolerance` days but the order never filled
+      backtest_only_gated_*  a live gate kept it out that day: retired rule / earnings / unsimulated (gate_class)
+      backtest_only_other    a different pick
+      live_only              live positions with no backtest entry near them
+    What the entries do not explain - fills, slippage, idle cash - is the residual."""
+    pos = {d: i for i, d in enumerate(dates)}
+    live = live_positions(live_closed, live_open)
+    pairs, unpaired, used = pair_entries(bt_entries, bt_trades, last_close, live, pos, tolerance)
+    # Staged orders that never became a position: no live entry of that name within `tolerance` days of staging.
+    filled = {}
+    for s, d in live:
+        if pd.Timestamp(d) in pos:
+            filled.setdefault(s, []).append(pos[pd.Timestamp(d)])
+    staged = {}
+    for r in live_bought.to_dict("records"):
+        j = pos.get(pd.Timestamp(r["date"]))
+        if j is not None and not any(abs(f - j) <= tolerance for f in filled.get(r["symbol"], [])):
+            staged.setdefault(r["symbol"], []).append(j)
+    gates = gate_index(book, pos)
+    pts = {"matched_live": sum(p["live"]["pnl"] for p in pairs), "matched_backtest": sum(p["bt"]["pnl"] for p in pairs),
+           "backtest_only_unfilled": 0.0, "backtest_only_gated_retired": 0.0, "backtest_only_gated_earnings": 0.0,
+           "backtest_only_gated_unsimulated": 0.0, "backtest_only_other": 0.0,
+           "live_only": sum(a["pnl"] for k, a in live.items() if k not in used)}
+    for u in unpaired:
+        why = gate_near(gates, u["symbol"], u["sig"])
+        if any(abs(j - u["sig"]) <= tolerance for j in staged.get(u["symbol"], [])):
+            pts["backtest_only_unfilled"] += u["bt"]["pnl"]
+        elif why:
+            pts[f"backtest_only_gated_{gate_class(why, offering_block)}"] += u["bt"]["pnl"]
+        else:
+            pts["backtest_only_other"] += u["bt"]["pnl"]
+    out = {k: round(100 * v / capital, 2) for k, v in pts.items()}
+    out["backtest_only_gated"] = round(sum(out[f"backtest_only_gated_{c}"] for c in ("retired", "earnings", "unsimulated")), 2)
+    out.update(split_pairs(pairs, capital))
+    out["matched_unfilled"] = sum(1 for u in unpaired
+                                  if any(abs(j - u["sig"]) <= tolerance for j in staged.get(u["symbol"], [])))
+    bt_side = out["matched_backtest"] + out["backtest_only_unfilled"] + out["backtest_only_gated"] + out["backtest_only_other"]
+    out["matched_difference"] = out.pop("matched_split_total")      # the same pairs, so the split sums to it
+    out["residual"] = round(gap_pts - ((out["matched_live"] + out["live_only"]) - bt_side), 2)
+    return out
 
 
 def run(cfg: dict, data=None, start: date | None = None, end: date | None = None) -> dict:
@@ -254,7 +312,6 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
     spy_ret = float(spy[spy.index <= pd.Timestamp(end)].iloc[-1] / spy[spy.index <= pd.Timestamp(start)].iloc[-1] - 1)
     bought = book[book["kind"] == "bought"] if len(book) else pd.DataFrame(columns=["date", "symbol"])
     ent = compare_entries(log, bought, book, panel["close"].index, last_day=end.isoformat())
-    gated = {r["symbol"] for r in book.to_dict("records") if r["kind"] in ("blocked", "analyst_remove")} if len(book) else set()
     st = _state.load_state()
     trades_file = _state.TRADES_FILE
     live_closed = pd.read_csv(trades_file) if Path(trades_file).exists() else pd.DataFrame(columns=["symbol", "entry_date", "pnl"])
@@ -263,8 +320,9 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
     live_open = [(s, p) for s, p in st["positions"].items() if p.get("filled") and p.get("entry_price")]
     gap = round(100 * (live_last / capital - bt_last / float(bt_eq.iloc[0])), 2)
     try:
-        attr = attribute(log, trades, panel["close"].ffill().iloc[-1], live_closed, live_open, bought, gated,
-                         panel["close"].index, capital, gap)
+        attr = attribute(log, trades, panel["close"].ffill().iloc[-1], live_closed, live_open, bought, book,
+                         panel["close"].index, capital, gap,
+                         offering_block=bool((cfg.get("facts") or {}).get("offering_block")))
     except Exception as e:                       # attribution is a breakdown, never a reason the replay fails
         attr = {"error": f"{type(e).__name__}: {e}"}
     from .config import release
@@ -334,20 +392,30 @@ def markdown(res: dict) -> list:
              f"counts as a match)"]
     a = res.get("attribution_pts") or {}
     if a and "error" not in a:
+        g = {c: -a.get(f"backtest_only_gated_{c}", 0.0) for c in ("retired", "earnings", "unsimulated")}
         lines.append(f"- the gap by cause, in points: same names {a['matched_difference']:+.1f} (live {a['matched_live']:+.1f} "
                      f"vs backtest {a['matched_backtest']:+.1f}); backtest-only kept out live {-a['backtest_only_gated']:+.1f}; "
+                     f"staged live but never filled {-a.get('backtest_only_unfilled', 0.0):+.1f}; "
                      f"other backtest-only {-a['backtest_only_other']:+.1f}; live-only {a['live_only']:+.1f}; "
                      f"fills, sizing and idle cash {a['residual']:+.1f}")
+        if a['backtest_only_gated']:
+            lines.append(f"  - kept out live, by gate: retired rule (dilution block) {g['retired']:+.1f}; earnings block "
+                         f"(the replay applies it too: a real mismatch) {g['earnings']:+.1f}; analyst or headline/social "
+                         f"block (not simulated) {g['unsimulated']:+.1f}")
         if a.get("matched_pairs"):
+            med = a.get("matched_size_ratio_median")
             lines.append(f"  - same names, split: position size {a['matched_size']:+.1f}, per-trade return "
-                         f"{a['matched_return']:+.1f} ({a['matched_pairs']} pairs; live positions a median "
-                         f"{a['matched_size_ratio_median']:.0%} of the backtest's)")
+                         f"{a['matched_return']:+.1f} ({a['matched_pairs']} filled pairs"
+                         + (f"; live positions a median {med:.0%} of the backtest's" if med is not None else "")
+                         + (f"; {a['matched_unfilled']} more staged live but never filled" if a.get("matched_unfilled") else "")
+                         + ")")
             for r in a.get("matched_worst") or []:
-                lines.append(f"    - {r['symbol']} {r['diff_pts']:+.1f}: live {r['live']} vs backtest {r['backtest']}; "
-                             f"size {r['size_ratio']:.0%}, entry price {r['entry_px_diff_pct']:+.1f}%")
+                size = (f"; size {r['size_ratio']:.0%}, entry price {r['entry_px_diff_pct']:+.1f}%"
+                        if r.get("size_ratio") is not None else "; size not recorded")
+                lines.append(f"    - {r['symbol']} {r['diff_pts']:+.1f}: live {r['live']} vs backtest {r['backtest']}{size}")
     if e.get("backtest_only_gated_live"):
         lines.append(f"  - {e['backtest_only_gated_live']} of the {e['backtest_only']} backtest-only names were kept out "
-                     f"live by a gate the replay does not apply (a hard-filter block or an analyst veto)")
+                     f"live by a gate that fired on the backtest's signal day (a hard-filter block or an analyst veto)")
     if e.get("median_lag_days") is not None:
         lines.append(f"  - matched names were staged live a median {e['median_lag_days']:+.0f} trading days after the backtest")
     if e["backtest_only_names"]:
