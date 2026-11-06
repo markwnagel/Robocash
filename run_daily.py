@@ -41,7 +41,7 @@ from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import auto_resume_due, can_exit_today, clear_halt, enforce_entry_limits, evaluate, resume_date
 from desk.signals import compute_panels, rerank, snapshot
 from desk import schedule, shadow, telemetry
-from desk.state import load_state, save_state, write_brief
+from desk.state import account_change, load_state, save_state, write_brief
 
 log = logging.getLogger("desk")
 ET = ZoneInfo("America/New_York")
@@ -93,6 +93,14 @@ def main() -> None:
         return
 
     acct = broker.account()
+    changed = account_change(st, acct.get("account_number"))
+    if changed:
+        log.error(changed)
+        publish(f"[{mode}] {changed}", today, cfg, args.dry_run, brief=False)
+        telemetry.note(status="blocked", reason="account changed")
+        return
+    if acct.get("account_number") and not st.get("account_number"):
+        st["account_number"] = acct["account_number"]      # saved with the sync below
     if acct["trading_blocked"]:
         publish(f"[{mode}] account is blocked by the broker; no action taken", today, cfg, args.dry_run, brief=False)
         telemetry.note(status="blocked", reason="account blocked by broker")

@@ -252,6 +252,22 @@ what it was asked, and every WARNING or ERROR log line. Secrets are redacted; a 
   date); `--resume` restarts sooner. The 25% hard floor needs `--resume --reset-hwm`.
 - To stop everything: `launchctl unload` the three plists, then close positions in the Alpaca UI if desired.
 
+### Moving to a new paper account
+
+1. Create the paper account in the Alpaca dashboard, generate its keys, and replace `ALPACA_API_KEY` /
+   `ALPACA_SECRET_KEY` in `.env`. Until step 2 runs, the desk refuses to trade: `state.json` records which account
+   it belongs to, and keys for another account stop the run with an "ACCOUNT CHANGED" alarm.
+2. Run `python scripts/switch_account.py` to see the plan, then `python scripts/switch_account.py --apply`. It needs a
+   flat new account (no positions, no open orders).
+3. Commit the `config.yaml` change it makes.
+
+The switch archives the old `state.json` (high-water marks, halt, positions) to `state/accounts/<old account>/` and
+starts a fresh one, so the kill switch measures from the new balance. It sets `account.since` to the first desk run
+on the new account: the email's since-inception rows (Alpaca's equity history), the parity replay and the stop rule
+measure against SPY and SPMO from there. The stop rule's checkpoints move by the same number of days. What the desk
+has learned stays: the trade log, the shadow book, the trial log, monitor findings and owner resolutions, audits and
+briefs.
+
 ## Costs
 
 Alpaca: $0 commissions; the real cost is spread and slippage, roughly 5-15 bps per side on liquid names. Market

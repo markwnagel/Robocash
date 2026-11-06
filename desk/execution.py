@@ -39,6 +39,8 @@ class Broker:
             "daytrade_count": int(a.daytrade_count or 0),
             "pattern_day_trader": bool(a.pattern_day_trader),
             "trading_blocked": bool(a.trading_blocked or a.account_blocked),
+            # Which Alpaca account the keys reach: state.json belongs to one (scripts/switch_account.py).
+            "account_number": str(getattr(a, "account_number", "") or ""),
         }
 
     def positions(self) -> dict:
