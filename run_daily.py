@@ -4,6 +4,7 @@
   python run_daily.py --dry-run        stage orders without submitting; writes no state, brief or webhook
   python run_daily.py                  live run against the configured (paper) account
   python run_daily.py --resume         clear a kill-switch halt, then run
+  python run_daily.py --force --max-new-entries 20   owner override: a daytime run that may buy up to 20 names
 
 Three phases. DECIDE reads bars, facts and the AI roles and plans exits and entries; it places no order
 except a trailing-stop ratchet. PROTECT checks every holding for a live broker-side stop. EXECUTE sends exits,
@@ -60,6 +61,9 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true", help="clear a kill-switch halt")
     ap.add_argument("--refresh-universe", action="store_true")
     ap.add_argument("--force", action="store_true", help="run even if today is not a trading day")
+    ap.add_argument("--max-new-entries", type=int, metavar="N",
+                    help="owner override for this run only: up to N new entries (default portfolio."
+                         "max_new_entries_per_day); the analyst reviews at least N")
     ap.add_argument("--reset-hwm", action="store_true",
                     help="with --resume after a HARD FLOOR halt: acknowledge re-baselining the all-time high")
     args = ap.parse_args()
@@ -69,6 +73,14 @@ def main() -> None:
     today = date.today()
     st = load_state()
     telemetry.note(dry_run=args.dry_run, release=release(cfg)["name"])
+    override = ""
+    if args.max_new_entries is not None:
+        if args.max_new_entries < 1:
+            ap.error("--max-new-entries must be at least 1")
+        cfg["portfolio"]["max_new_entries_per_day"] = args.max_new_entries
+        cfg["analyst"]["candidates_to_review"] = max(int(cfg["analyst"]["candidates_to_review"]), args.max_new_entries)
+        override = f"owner override: up to {args.max_new_entries} new entries this run (--max-new-entries)"
+        telemetry.note(max_new_entries_override=args.max_new_entries)
     if args.resume:
         if st.get("hard_halted") and not args.reset_hwm:
             msg = (f"HARD FLOOR halt ({st.get('halt_reason')}) is not cleared by --resume alone. "
@@ -120,6 +132,8 @@ def main() -> None:
         clear_halt(st)
     live = broker.positions()
     notes = sync_positions(st, broker, live, today)
+    if override:
+        notes.insert(0, override)
     if resumed:
         notes.insert(0, resumed)
     if not args.dry_run:
@@ -445,6 +459,11 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         sz = size_position(equity, cash_avail, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
         if not sz:
             continue
+        # The last picks of a big day get what cash is left (backtest.py sizes the same way); say so, or a
+        # 1-share position reads as a sizing bug (monitor F-55, 2026-11-06).
+        unconstrained = size_position(equity, equity, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
+        cash_cut = (f" | cash-limited: {sz['qty']:g} of {unconstrained['qty']:g} shares"
+                    if unconstrained and sz["qty"] < unconstrained["qty"] else "")
         mult = size_multiplier(facts.get(sym, {}), cfg["facts"]) if facts else 1.0
         if mult < 1.0:
             # One share is already the smallest expressible position; shrinking below it would drop the
@@ -462,7 +481,8 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             "thesis": f"rank {int(row['rank'])}, 6m mom {row['momentum']:.0%}, 20d {row['short']:.0%}"
                       + (" | half size: implied vol >> realized" if mult < 1.0 else "")
                       + (" | insider buying tilt" if sym in tilt else "")
-                      + (" | dilutive filing flagged" if (facts.get(sym) or {}).get("offering_filings") else ""),
+                      + (" | dilutive filing flagged" if (facts.get(sym) or {}).get("offering_filings") else "")
+                      + cash_cut,
         })
 
     max_new = pcfg.get("max_new_entries_per_day")

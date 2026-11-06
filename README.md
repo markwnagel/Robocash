@@ -163,6 +163,7 @@ cp .env.example .env     # Alpaca paper keys, Anthropic key, SEC_USER_AGENT, FIN
 .venv/bin/python run_daily.py                 # real run against the account in config.yaml (paper: true)
 .venv/bin/python run_daily.py --resume        # clear a kill-switch halt now instead of on its resume date
 .venv/bin/python run_daily.py --no-analyst    # skip red team + analyst (engine + facts + risk only)
+.venv/bin/python run_daily.py --force --max-new-entries 20   # owner override: a daytime run buying up to 20
 .venv/bin/python report_daily.py --print      # build the daily email without sending it
 .venv/bin/python monitor.py --print           # health check: analyze and print, save and send nothing
 .venv/bin/python monitor.py --no-llm          # signals and the rules-only report, no Claude call

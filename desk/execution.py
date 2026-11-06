@@ -276,9 +276,13 @@ def sync_positions(state: dict, broker: Broker, live: dict, today: date) -> list
                 # First sight of the fill. entry_date is when the order was staged (the evening before), so
                 # the day-trade guard needs this to know which positions were bought today.
                 pos["filled_date"] = today.isoformat()
+                staged_qty, filled_qty = float(pos.get("qty") or 0), float(live[sym]["qty"])
+                shares = f"{filled_qty:g} of {staged_qty:g} shares filled"
                 moved = anchor_to_fill(pos, sym, float(live[sym]["avg_entry_price"]))
                 if moved:
-                    notes.append(moved)
+                    notes.append(f"{moved}; {shares}")       # price and size, so a partial fill reads as one
+                if staged_qty and filled_qty < staged_qty:
+                    notes.append(f"{sym} partial fill: {shares}")
             pos["filled"] = True
             pos["entry_price"] = live[sym]["avg_entry_price"]
             pos["qty"] = live[sym]["qty"]

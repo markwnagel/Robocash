@@ -74,10 +74,17 @@ def feed_signals(events: list) -> dict:
         if e.get("event") != "feed_quality":
             continue
         f = out.setdefault(e.get("feed", "?"), {"symbols": 0, "kept": 0, "dropped_unrelated": 0, "_by": {}})
+        if "unrelated" in e:
+            # news_classified (desk/facts.py): `shown` headlines read by the classifier, `unrelated` of them not
+            # about the company - the keyword filter's leak. Summed as 0/0 under the news feed's names (F-59).
+            dropped = int(e.get("unrelated") or 0)
+            kept = max(0, int(e.get("shown") or 0) - dropped)
+        else:
+            kept, dropped = int(e.get("kept") or 0), int(e.get("dropped_unrelated") or 0)
         f["symbols"] += 1
-        f["kept"] += int(e.get("kept") or 0)
-        f["dropped_unrelated"] += int(e.get("dropped_unrelated") or 0)
-        f["_by"][e.get("symbol")] = f["_by"].get(e.get("symbol"), 0) + int(e.get("dropped_unrelated") or 0)
+        f["kept"] += kept
+        f["dropped_unrelated"] += dropped
+        f["_by"][e.get("symbol")] = f["_by"].get(e.get("symbol"), 0) + dropped
     for f in out.values():
         by = f.pop("_by")
         f["most_dropped"] = [[s, n] for s, n in sorted(by.items(), key=lambda x: -x[1])[:5] if n]
