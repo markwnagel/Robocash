@@ -147,7 +147,7 @@ RED_TEAM_SCHEMA = {
     "additionalProperties": False,
 }
 
-ANALYST_SYSTEM = """You are the analyst on a systematic, long-only US equity strategy run from a small (about $10k) Alpaca account.
+ANALYST_SYSTEM = """You are the analyst on a systematic, long-only US equity strategy run on an Alpaca paper account (its equity is in the payload).
 Positions are held 15-60 days with broker-side stop-loss and take-profit orders.
 
 Your authority is veto-only. You receive current holdings, today's candidate entries from the quant engine, a fact sheet per name
