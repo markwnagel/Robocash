@@ -298,6 +298,9 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
         data = StockHistoricalDataClient(*alpaca_keys())
     root = Path(cfg["_root"])
     book = shadow.load()
+    if len(book):
+        # The same window as the returns: an earlier account's decisions are not this account's entries (F-57).
+        book = book[pd.to_datetime(book["date"]) >= pd.Timestamp(start)]
     uni = json.loads((root / "state" / "universe.json").read_text()).get("symbols", [])
     symbols = sorted(set(uni) | set(book["symbol"] if len(book) else []) | set(_state.load_state()["positions"]))
     warm = int(cfg["signals"]["momentum_lookback_days"]) + int(cfg["signals"]["trend_ma_days"])
@@ -391,6 +394,8 @@ def markdown(res: dict) -> list:
              *([f"- since {res['since_release']['release']} ({res['since_release']['from']} close): live "
                 f"{res['since_release']['live_return']:+.1%}, backtest {res['since_release']['backtest_return']:+.1%}, "
                 f"SPY {res['since_release']['spy_return']:+.1%}"] if res.get("since_release") else []),
+             *(["- the replay has opened no positions yet (window too short): the gap carries no information"]
+               if not res.get("backtest_entries") else []),
              f"- cash: live {res['live_cash_share']:.0%}, backtest {res['backtest_cash_share']:.0%}",
              f"- entries: {e['both']} in both, {e['backtest_only']} backtest only, {e['live_only']} live only "
              f"(overlap {e['overlap']}; a name staged by both within {e.get('match_tolerance_days', 5)} trading days "
