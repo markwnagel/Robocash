@@ -28,7 +28,7 @@ REQUIRED = {
 }
 FRACTIONS = {("risk", "max_drawdown_pct"), ("risk", "max_cumulative_drawdown_pct"), ("risk", "daily_loss_halt_pct"),
              ("portfolio", "risk_per_trade_pct"), ("portfolio", "max_position_pct"), ("portfolio", "cash_floor_pct"),
-             ("analyst", "reduce_factor")}
+             ("portfolio", "min_entry_fraction"), ("analyst", "reduce_factor")}
 
 
 def validate(cfg: dict) -> None:

@@ -363,30 +363,33 @@ approximated from daily bars or an AI layer the backtest does not simulate: a hi
 sufficient.
 
 <!-- trials:start -->
-_Generated from 111 logged runs (latest 2026-11-02 05:56 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `pit`, N = 107 trials._
+_Generated from 123 logged runs (latest 2026-11-06 22:39 UTC) by `scripts/trials_report.py --write-readme`. Window 2023-09-11 to 2026-09-11, universe `pit`, N = 110 trials._
 
 | Variant | Deflated Sharpe | Return | Max DD | Sharpe | Runs |
 |---|---|---|---|---|---|
-| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.cash-sweep {'enabled': True, 'band_pct': 0.02}, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.89 | +140% | -22.2% | 1.31 | 2 |
-| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.86 | +120% | -18.1% | 1.22 | 3 |
+| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.cash-sweep {'enabled': True, 'band_pct': 0.02}, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.90 | +140% | -22.2% | 1.31 | 2 |
+| exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20, signals.momentum-lookback-days 252 | 0.87 | +120% | -18.1% | 1.22 | 3 |
+| portfolio.min-entry-fraction 0 | 0.80 | +97% | -21.0% | 1.06 | 2 |
+| portfolio.min-entry-fraction 0.25 | 0.75 | +85% | -20.8% | 0.96 | 2 |
 | portfolio.correlation-days 120 | 0.73 | +70% | -18.7% | 0.92 | 1 |
-| facts.offering-block-backtest False | 0.72 | +68% | -18.7% | 0.91 | 1 |
-| portfolio.cash-sweep {'enabled': False} | 0.72 | +68% | -18.7% | 0.91 | 2 |
-| **current: config.yaml** | 0.72 | +68% | -18.7% | 0.91 | 1 |
+| facts.offering-block-backtest False | 0.73 | +68% | -18.7% | 0.91 | 1 |
+| portfolio.cash-sweep {'enabled': False} | 0.73 | +68% | -18.7% | 0.91 | 2 |
+| **current: config.yaml** | 0.73 | +68% | -18.7% | 0.91 | 1 |
 | regime.off-liquidate True | 0.71 | +64% | -16.0% | 0.89 | 1 |
 | exits.max-hold-days 126, exits.min-hold-days 21, exits.signal-decay-rank 80, exits.stop-atr-multiple 4.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.07, portfolio.max-positions 25, portfolio.target-positions 20 | 0.71 | +65% | -20.2% | 0.89 | 1 |
 | portfolio.max-position-pct 0.15, portfolio.risk-per-trade-pct 0.015, portfolio.trim-above-pct 0.2, portfolio.trim-to-pct 0.15 | 0.69 | +68% | -19.8% | 0.86 | 1 |
-| facts.offering-block-backtest True | 0.68 | +62% | -18.9% | 0.84 | 1 |
+| facts.offering-block-backtest True | 0.69 | +62% | -18.9% | 0.84 | 1 |
 | regime.risk-off-scale 1.0 | 0.68 | +62% | -20.1% | 0.84 | 1 |
-| portfolio.cash-sweep {'enabled': True, 'band_pct': 0.02} | 0.61 | +51% | -22.2% | 0.73 | 5 |
-| portfolio.cash-sweep {'enabled': True, 'band_pct': 0.05} | 0.60 | +50% | -21.7% | 0.72 | 2 |
+| portfolio.min-entry-fraction 0.5 | 0.68 | +71% | -22.7% | 0.84 | 2 |
+| portfolio.cash-sweep {'enabled': True, 'band_pct': 0.02} | 0.62 | +51% | -22.2% | 0.73 | 5 |
+| portfolio.cash-sweep {'enabled': True, 'band_pct': 0.05} | 0.61 | +50% | -21.7% | 0.72 | 2 |
 | risk.max-cumulative-drawdown-pct 0.35, risk.max-drawdown-pct 0.25 | 0.59 | +47% | -25.8% | 0.69 | 1 |
-| portfolio.target-positions 15 | 0.58 | +50% | -20.9% | 0.69 | 1 |
-| portfolio.max-position-pct 0.15, portfolio.risk-per-trade-pct 0.0125, portfolio.trim-above-pct 0.2, portfolio.trim-to-pct 0.15 | 0.58 | +45% | -19.5% | 0.69 | 1 |
-| risk.max-drawdown-pct 0.99 | 0.57 | +43% | -29.2% | 0.67 | 1 |
-| portfolio.target-positions 15, regime.off-liquidate True | 0.56 | +44% | -16.6% | 0.65 | 1 |
-| exits.signal-decay-rank 80 | 0.53 | +39% | -18.3% | 0.61 | 1 |
-| exits.max-hold-days 252, exits.min-hold-days 63, exits.signal-decay-rank 100, exits.stop-atr-multiple 10.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.06, portfolio.max-positions 30, portfolio.sizing notional, portfolio.target-positions 25, portfolio.vol-weighting False, signals.max-atr-pct 0.15, signals.momentum-lookback-days 252, signals.weights {'momentum': 1.0, 'short': 0.0, 'low_vol': 0.0} | 0.53 | +52% | -31.4% | 0.61 | 1 |
+| portfolio.target-positions 15 | 0.59 | +50% | -20.9% | 0.69 | 1 |
+| portfolio.max-position-pct 0.15, portfolio.risk-per-trade-pct 0.0125, portfolio.trim-above-pct 0.2, portfolio.trim-to-pct 0.15 | 0.59 | +45% | -19.5% | 0.69 | 1 |
+| risk.max-drawdown-pct 0.99 | 0.58 | +43% | -29.2% | 0.67 | 1 |
+| portfolio.target-positions 15, regime.off-liquidate True | 0.57 | +44% | -16.6% | 0.65 | 1 |
+| exits.signal-decay-rank 80 | 0.54 | +39% | -18.3% | 0.61 | 1 |
+| exits.max-hold-days 252, exits.min-hold-days 63, exits.signal-decay-rank 100, exits.stop-atr-multiple 10.0, exits.take-profit-r-multiple 0.0, portfolio.max-position-pct 0.06, portfolio.max-positions 30, portfolio.sizing notional, portfolio.target-positions 25, portfolio.vol-weighting False, signals.max-atr-pct 0.15, signals.momentum-lookback-days 252, signals.weights {'momentum': 1.0, 'short': 0.0, 'low_vol': 0.0} | 0.54 | +52% | -31.4% | 0.61 | 1 |
 | signals.weights {'momentum': 0.6, 'short': 0.1, 'low_vol': 0.3} | 0.42 | +17% | -15.5% | 0.45 | 1 |
 | signals.weights {'momentum': 0.6, 'short': 0.15, 'low_vol': 0.25} | 0.32 | +11% | -19.3% | 0.29 | 1 |
 <!-- trials:end -->

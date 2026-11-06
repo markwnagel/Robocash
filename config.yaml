@@ -110,6 +110,12 @@ portfolio:
     #           max DD -22.8% vs -17.9% (better 0/4); paired seeds better 18/20
     # Clears the owner's bar in both windows at live cash, which the 10-17 run did not. Still exposure, not
     # edge (invested 63-68% -> 77-83%), and 2023-26 drawdown ~5pt deeper. Decision for 2026-11-06.
+  min_entry_fraction: 0       # skip a pick the remaining cash funds at under this share of a full position
+                              # (desk/portfolio.too_small). 0 = off. Owner asked 2026-11-06 after HST/KO slivers;
+                              # scripts/check_min_entry.py, 4 starts x 2 windows, point-in-time: at $100k 0.25 cut
+                              # CAGR 23.2% -> 20.2% in 2023-26 (worse 4/4) and 9.4 -> 9.3% in 2018-26 (2/4); 0.5
+                              # 23.2 -> 21.6% (worse 3/4). At $10k 0.25 won 2018-26 (3/4) and lost 2023-26 (0/4).
+                              # No consistent gain on return or against SPY in either window. Off; the owner decides.
   max_new_entries_per_day: 4  # spreads entry timing. Backtested 2026-09-12 (3y): unlimited = +104%/DD -27.7%
                               # with six hard-floor hits vs +247%/-20.5% at 4/day - batch entries share one
                               # day's gap risk and trip the kill switch together. Keep.

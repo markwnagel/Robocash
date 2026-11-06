@@ -33,7 +33,7 @@ from alpaca.trading.client import TradingClient
 
 from desk.config import alpaca_keys, load_config, require_paper
 from desk.data import build_universe, fetch_daily_bars
-from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries, shrink_qty, size_position,
+from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries, shrink_qty, size_position, too_small,
                             trail_stop)
 from desk.regime import regime_params, regime_scale_series, regime_state_series, vix_series
 from desk.signals import compute_panels, panel_key, rerank, snapshot
@@ -386,6 +386,10 @@ def run_backtest(panel: dict, cfg: dict, start: pd.Timestamp, end: pd.Timestamp,
                 sz = size_position(equity, cash_avail, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
                 if not sz:
                     continue
+                if pcfg.get("min_entry_fraction"):
+                    full = size_position(equity, equity, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
+                    if full and too_small(sz["qty"], full["qty"], pcfg["min_entry_fraction"]):
+                        continue
                 if veto:
                     r = veto["rng"]
                     if r.random() < veto["remove"]:

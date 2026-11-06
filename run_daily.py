@@ -36,7 +36,7 @@ from desk.data import SESSION_DONE, build_universe, cached_bars
 from desk.execution import Broker, sync_positions
 from desk.facts import FactBuilder, broker_asset_lookup, candidate_blockers, compact, insider_tilt, size_multiplier
 from desk.notify import send
-from desk.portfolio import (decay_exit, entry_limit, pace_entries, pyramid_due, select_entries, shrink_qty, size_position,
+from desk.portfolio import (decay_exit, entry_limit, pace_entries, pyramid_due, too_small, select_entries, shrink_qty, size_position,
                             trail_stop)
 from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import auto_resume_due, can_exit_today, clear_halt, enforce_entry_limits, evaluate, resume_date
@@ -462,6 +462,10 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         # The last picks of a big day get what cash is left (backtest.py sizes the same way); say so, or a
         # 1-share position reads as a sizing bug (monitor F-55, 2026-11-06).
         unconstrained = size_position(equity, equity, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
+        if unconstrained and too_small(sz["qty"], unconstrained["qty"], pcfg.get("min_entry_fraction")):
+            notes.append(f"skipped {sym}: the cash left buys {sz['qty']:g} of {unconstrained['qty']:g} shares, under "
+                         f"{float(pcfg['min_entry_fraction']):.0%} of a full position - picked again when cash frees up")
+            continue
         cash_cut = (f" | cash-limited: {sz['qty']:g} of {unconstrained['qty']:g} shares"
                     if unconstrained and sz["qty"] < unconstrained["qty"] else "")
         mult = size_multiplier(facts.get(sym, {}), cfg["facts"]) if facts else 1.0
