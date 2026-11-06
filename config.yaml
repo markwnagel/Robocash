@@ -39,7 +39,7 @@ release:                       # the strategy version results are reported under
 account:
   paper: true
   starting_capital: 10000     # backtests and trials; live sizing reads the account
-  since: null                 # first desk run on the current paper account; set by scripts/switch_account.py.
+  since: 2026-11-06           # first desk run on the current paper account; set by scripts/switch_account.py.
                               # Results vs SPY and SPMO (parity, the stop rule) start here; null = all briefs.
 
 data:
@@ -293,9 +293,9 @@ parity:                        # desk/parity.py: the backtest replayed over the 
 governance:
   stop_rule:                   # quant review 2026-11-01. The desk's alternative is a momentum ETF, not cash: the release
     benchmark: SPMO            # is judged against SPMO (price, Alpaca bars - no dividends on either side) and SPY, from
-    warn_on: 2027-04-30        # release.since, or account.since if later. REVIEW (owner looks again) on or after warn_on if
+    warn_on: 2027-05-07        # release.since, or account.since if later. REVIEW (owner looks again) on or after warn_on if
     warn_trail_pts: 20         # the desk trails SPMO by > warn_trail_pts; STOP (replace the stock picker with SPMO; owner decides)
-    decide_on: 2027-10-29      # on or after decide_on if it trails SPMO by > stop_trail_pts AND trails SPY.
+    decide_on: 2027-11-05      # on or after decide_on if it trails SPMO by > stop_trail_pts AND trails SPY.
     stop_trail_pts: 15         # Calibrated on v2.1's own backtest (24 starts, 2018-26 and 2023-26): over 7 months it
                                # trails SPMO by > 20pt 8% of the time; over 12 months by > 15pt 19% of the time - the
                                # false-stop rate accepted if the backtest is right. Its median over 12 months is -3.4pt
