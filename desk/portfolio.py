@@ -28,6 +28,14 @@ def pace_entries(entries: list, max_new, positions: dict, today) -> tuple:
                             f"(max {max_new}/day{earlier})")
 
 
+def too_small(qty: float, full_qty: float, min_fraction) -> bool:
+    """A pick the remaining cash can fund only as a sliver: under portfolio.min_entry_fraction of the shares it
+    would get with cash to spare. Skipped rather than bought (HST: 2 shares, $50 of a ~$7k slot, 2026-11-06); it is
+    picked again on a later session if still ranked. Judged before any deliberate cut (half size, analyst REDUCE),
+    so a cut is never mistaken for a sliver. 0 or None = off."""
+    return bool(min_fraction) and full_qty > 0 and qty < float(min_fraction) * full_qty
+
+
 def shrink_qty(qty: int, factor: float) -> int:
     """Every size cut (analyst REDUCE, implied-vol half size, simulated vetoes): floored so it never rounds
     back up, never below one share so a cut never turns into a silent exclusion, and the factor is clamped
