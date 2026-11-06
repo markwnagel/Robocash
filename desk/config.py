@@ -41,6 +41,10 @@ def validate(cfg: dict) -> None:
             problems.append(f"{section}: section missing")
             continue
         problems += [f"{section}.{k}: missing" for k in keys if k not in body]
+    try:
+        account_since(cfg)
+    except ValueError:
+        problems.append(f"account.since: not a date ({(cfg.get('account') or {}).get('since')!r})")
     for section, key in FRACTIONS:
         v = (cfg.get(section) or {}).get(key)
         if v is not None and not (isinstance(v, (int, float)) and 0 <= v <= 1):
@@ -59,6 +63,26 @@ def release(cfg: dict) -> dict:
     if since is not None and not isinstance(since, _date):
         since = _date.fromisoformat(str(since))
     return {"name": r.get("name"), "since": since}
+
+
+def _as_date(v):
+    from datetime import date as _date
+    if v is None or isinstance(v, _date):
+        return v
+    return _date.fromisoformat(str(v))
+
+
+def account_since(cfg: dict):
+    """The first desk run on the current paper account (config account.since, set by scripts/switch_account.py),
+    or None. Results against SPY and SPMO start here: the earlier account's equity is history, not this record."""
+    return _as_date((cfg.get("account") or {}).get("since"))
+
+
+def measured_from(cfg: dict):
+    """Where the current release's record starts - release.since, or account.since when the account is newer. The
+    parity since-release block and the stop rule read this, so neither straddles two accounts."""
+    dates = [d for d in (release(cfg)["since"], account_since(cfg)) if d]
+    return max(dates) if dates else None
 
 
 def load_config(path=None) -> dict:

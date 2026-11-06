@@ -50,6 +50,22 @@ def _default_state() -> dict:
     }
 
 
+def masked(number: str) -> str:
+    return f"...{str(number)[-4:]}" if number else "unknown"
+
+
+def account_change(state: dict, number: str) -> str:
+    """Why the run must stop, or "" - state.json (high-water marks, positions, halt) belongs to the Alpaca account
+    it was written against. Keys that reach another account would carry the old drawdown into the new one and
+    lose track of the old positions, so the desk refuses until scripts/switch_account.py starts the new state."""
+    held = state.get("account_number")
+    if not held or not number or held == number:
+        return ""
+    return (f"ACCOUNT CHANGED: state.json belongs to Alpaca account {masked(held)}, but the keys in .env reach "
+            f"{masked(number)}. No action taken. Run python scripts/switch_account.py to archive the old account's "
+            f"state and start the new one.")
+
+
 def load_state() -> dict:
     STATE_DIR.mkdir(exist_ok=True)
     if not STATE_FILE.exists():

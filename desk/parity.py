@@ -283,7 +283,11 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
     import backtest as B
     from .data import cached_bars
     from .regime import vix_series
+    from .config import account_since
     eq = live_equity()
+    acc = account_since(cfg)
+    if acc is not None and not eq.empty:
+        eq = eq[eq.index >= pd.Timestamp(acc)]        # an earlier account's briefs are not this account's record
     if eq.empty:
         return {}
     start = start or eq.index[0].date()
@@ -325,15 +329,16 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
                          offering_block=bool((cfg.get("facts") or {}).get("offering_block")))
     except Exception as e:                       # attribution is a breakdown, never a reason the replay fails
         attr = {"error": f"{type(e).__name__}: {e}"}
-    from .config import release
+    from .config import measured_from, release
     rel = release(cfg)
     since = {}
-    cut = pd.Timestamp(rel["since"]) if rel["name"] and rel["since"] else None
+    frm = measured_from(cfg) if rel["name"] else None
+    cut = pd.Timestamp(frm) if frm else None
     if cut is not None and cut < pd.Timestamp(end) and (eq.index <= cut).any() and (bt_eq.index <= cut).any():
         # The same window for both: from the cut's close. The replay carries its own positions across the cut, as
         # live carries v1's - so this compares the two books under the new release, not two fresh starts.
         s_cut = spy[spy.index <= cut].iloc[-1]
-        since = {"release": rel["name"], "from": rel["since"].isoformat(),
+        since = {"release": rel["name"], "from": frm.isoformat(),
                  "live_return": round(live_last / float(eq["equity"][eq.index <= cut].iloc[-1]) - 1, 4),
                  "backtest_return": round(bt_last / float(bt_eq[bt_eq.index <= cut].iloc[-1]) - 1, 4),
                  "spy_return": round(float(spy[spy.index <= pd.Timestamp(end)].iloc[-1] / s_cut - 1), 4)}
