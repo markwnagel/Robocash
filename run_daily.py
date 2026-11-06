@@ -35,7 +35,7 @@ from desk.data import SESSION_DONE, build_universe, cached_bars
 from desk.execution import Broker, sync_positions
 from desk.facts import FactBuilder, broker_asset_lookup, candidate_blockers, compact, insider_tilt, size_multiplier
 from desk.notify import send
-from desk.portfolio import (decay_exit, entry_limit, pyramid_due, select_entries, shrink_qty, size_position,
+from desk.portfolio import (decay_exit, entry_limit, pace_entries, pyramid_due, select_entries, shrink_qty, size_position,
                             trail_stop)
 from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import auto_resume_due, can_exit_today, clear_halt, enforce_entry_limits, evaluate, resume_date
@@ -465,12 +465,11 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                       + (" | dilutive filing flagged" if (facts.get(sym) or {}).get("offering_filings") else ""),
         })
 
-    max_new = pcfg.get("max_new_entries_per_day")
-    if max_new and len(entries) > max_new:
-        # Paced before the analyst so review cost and freshness track what is actually bought today;
-        # deferred names are re-selected (and re-reviewed) on later sessions if still ranked.
-        notes.append(f"entry pacing: {len(entries) - max_new} deferred to later sessions (max {max_new}/day)")
-        entries = entries[:max_new]
+    # Paced before the analyst so review cost and freshness track what is actually bought today;
+    # deferred names are re-selected (and re-reviewed) on later sessions if still ranked.
+    entries, pace_note = pace_entries(entries, pcfg.get("max_new_entries_per_day"), st["positions"], today)
+    if pace_note:
+        notes.append(pace_note)
 
     analyst_out, analyst_status = None, "skipped"
     if cfg["analyst"]["enabled"] and not args.no_analyst and (entries or st["positions"]):

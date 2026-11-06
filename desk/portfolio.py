@@ -13,6 +13,21 @@ def entry_limit(price: float) -> float:
     return round(price * ENTRY_LIMIT_MULT, 2)
 
 
+def pace_entries(entries: list, max_new, positions: dict, today) -> tuple:
+    """(entries kept, note or ""). max_new_entries_per_day is per day, not per run: entries an earlier run placed
+    today count against it, so a second run the same day (a forced daytime run, then the evening job) cannot double
+    the pace. Falsy max_new = no cap."""
+    if not max_new:
+        return entries, ""
+    placed = sum(1 for p in (positions or {}).values() if p.get("entry_date") == today.isoformat())
+    room = max(0, int(max_new) - placed)
+    if len(entries) <= room:
+        return entries, ""
+    earlier = f"; {placed} already placed today" if placed else ""
+    return entries[:room], (f"entry pacing: {len(entries) - room} deferred to later sessions "
+                            f"(max {max_new}/day{earlier})")
+
+
 def shrink_qty(qty: int, factor: float) -> int:
     """Every size cut (analyst REDUCE, implied-vol half size, simulated vetoes): floored so it never rounds
     back up, never below one share so a cut never turns into a silent exclusion, and the factor is clamped
