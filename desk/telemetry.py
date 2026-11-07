@@ -281,13 +281,31 @@ def end_run(status: str, error: str | None = None) -> None:
     _run.update(id=None, job=None, t0=None, fields={}, handler=None)
 
 
+def keep_awake():
+    """Hold a no-idle-sleep assertion for this process's life (macOS caffeinate, released when it exits). launchd
+    starts a job inside a ~10-second maintenance wake; without an assertion the Mac sleeps again and the job runs
+    in slices. The 2026-11-07 audit did: the Alpaca download was reset and the Claude stream stalled to a
+    ReadTimeout after 17 minutes. Never raises; returns the caffeinate process or None."""
+    exe = "/usr/bin/caffeinate"
+    if sys.platform != "darwin" or os.environ.get("TEAMROBO_NO_CAFFEINATE") or not Path(exe).exists():
+        return None
+    try:
+        import subprocess
+        return subprocess.Popen([exe, "-i", "-s", "-w", str(os.getpid())],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+
+
 def run_job(job: str, fn) -> None:
     """Run a job's main() between run_start and run_end. A crash is recorded, then re-raised unchanged.
     --help is not a run: it was being logged as one and counted by the monitor."""
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         fn()
         return
+    awake = keep_awake()
     start_run(job)
+    note(kept_awake=awake is not None)
     record_missed_slots()
     try:
         fn()
