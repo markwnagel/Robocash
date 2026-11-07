@@ -7,6 +7,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import os  # noqa: E402
+
+os.environ.setdefault("TEAMROBO_NO_CAFFEINATE", "1")    # jobs run in tests take no sleep assertion
+
 from desk import config as config_mod  # noqa: E402
 from desk.config import load_config as _load_live_config  # noqa: E402
 

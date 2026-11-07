@@ -264,6 +264,7 @@ def _call_json(system: str, user_text: str, schema: dict, model: str, max_search
                           **(composition or {}))
         return None
     except Exception as e:
+        LAST_CALL["error"] = type(e).__name__          # the call never completed: a timeout or a dropped connection
         log.error("analyst call failed (%s): %s", type(e).__name__, e)
         telemetry.llm_call(role, model, started, responses, outcome="error", error=f"{type(e).__name__}: {e}",
                            input_chars=len(user_text), **(composition or {}))

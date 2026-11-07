@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 
-from desk.analyst import _call_json
+from desk.analyst import LAST_CALL, _call_json
 from desk.config import ROOT, alpaca_keys, load_config, release
 from desk.data import cached_bars
 from desk import schedule
@@ -169,6 +169,28 @@ def current_context(cfg: dict, today: date) -> dict:
             "owner_decisions": (cfg.get("monitor") or {}).get("owner_decisions") or [],
             "stop_rule": stop_rule_status((cfg.get("governance") or {}).get("stop_rule") or {},
                                           (par or {}).get("since_release") or {}, today)}
+
+
+def ask_auditor(call, attempts: int = 2) -> dict | None:
+    """The auditor's reply, asked up to `attempts` times. Asked again when the reply is empty (2026-10-17: schema-valid
+    with a placeholder summary) or the call never completed (2026-11-07: ReadTimeout after 17 minutes with the Mac
+    asleep). A refusal or an unparseable reply is final. The weekly audit has no deadline, so a retry costs time only."""
+    out = None
+    for attempt in range(attempts):
+        last = attempt == attempts - 1
+        out = call()
+        if out is None:
+            if LAST_CALL.get("error") and not last:
+                log.error("auditor call failed (%s) - asking again", LAST_CALL["error"])
+                continue
+            return None
+        if usable_audit(out):
+            return out
+        log.error("auditor reply is empty (summary %r, %d findings) - %s", str(out.get("summary"))[:40],
+                  len(out.get("findings") or []), "giving up" if last else "asking again")
+        telemetry.agent_output("auditor", None, None, empty_reply=1)
+        out = None
+    return out
 
 
 def trade_stats(trades: pd.DataFrame, closes: pd.DataFrame | None, post_days) -> dict:
@@ -390,15 +412,8 @@ def main() -> None:
     }
     # Output tokens 11,960 / 11,134 / 15,022 on 09-26..10-10 against a 16k cap, then cut off at 16,000 on 10-17
     # once the 90-day window doubled the trades it reads: the reply did not parse and the week had no audit.
-    for attempt in range(2):
-        out = _call_json(AUDIT_SYSTEM, json.dumps(payload, indent=1, default=str), AUDIT_SCHEMA, acfg["model"], 0,
-                         role="auditor", max_tokens=AUDIT_MAX_TOKENS)
-        if out is None or usable_audit(out):
-            break
-        log.error("auditor reply is empty (summary %r, %d findings) - %s", str(out.get("summary"))[:40],
-                  len(out.get("findings") or []), "asking again" if attempt == 0 else "giving up")
-        telemetry.agent_output("auditor", None, None, empty_reply=1)
-        out = None
+    out = ask_auditor(lambda: _call_json(AUDIT_SYSTEM, json.dumps(payload, indent=1, default=str), AUDIT_SCHEMA,
+                                         acfg["model"], 0, role="auditor", max_tokens=AUDIT_MAX_TOKENS))
     if not out:
         msg = f"AUDIT {today}: auditor unavailable. Stats: {json.dumps(stats)}"
         send(msg, cfg)
