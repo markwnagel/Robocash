@@ -110,6 +110,8 @@ portfolio:
     #           max DD -22.8% vs -17.9% (better 0/4); paired seeds better 18/20
     # Clears the owner's bar in both windows at live cash, which the 10-17 run did not. Still exposure, not
     # edge (invested 63-68% -> 77-83%), and 2023-26 drawdown ~5pt deeper. Decision for 2026-11-06.
+    # Deferred to 2026-12-07 (audit 2026-11-07): both studies assumed 32-37% idle cash, and the new account went
+    # 95% invested on 2026-11-06 (cash 5.1%). Revisit once a month of the new book shows its own idle cash.
   min_entry_fraction: 0       # skip a pick the remaining cash funds at under this share of a full position
                               # (desk/portfolio.too_small). 0 = off. Owner asked 2026-11-06 after HST/KO slivers;
                               # scripts/check_min_entry.py, 4 starts x 2 windows, point-in-time: at $100k 0.25 cut
@@ -309,12 +311,15 @@ governance:
                                # Checked weekly by the audit (audit.stop_rule_status, from parity.since_release).
 
 budget:
-  monthly_api_usd: 25          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). An alarm,
+  monthly_api_usd: 35          # the monitor raises SEV2 at 80%, SEV1 at 100% (month to date, from telemetry). An alarm,
                                # not a cap. Keep the Anthropic Console limit at or above this: at the Console limit every
                                # role fails and the desk buys nothing (2026-10-17). ~$35/mo before the 2026-10-17 cuts.
                                # 2026-11-01: 40 -> 25. Post-cut telemetry ~$0.64/trading day + the weekly audit = ~$16-18/mo,
                                # so SEV2 ($20) sits above a normal month; 20 would have put SEV2 inside it (audit 10-31).
                                # Target <= ~1.5%/yr of the account until the agents show value; recheck in December.
+                               # 2026-11-07: 25 -> 35 (audit 2026-11-07). The new account's book runs ~$1.36/trading day
+                               # (~$29 a month plus the weekly audits), so $25 would raise SEV1 every month. 24% of the
+                               # spend so far was one unrecorded run (F-56), which now runs inside the recorded job.
 
 report:
   to: mark@markwnagel.com   # daily activity email, 14:00 local (after the 13:40 desk run)
@@ -337,9 +342,10 @@ monitor:                       # agent reliability monitor (monitor.py): runs we
     - "2026-10-17: the red team reviews buy candidates only (analyst.red_team_scope, cost cut); the analyst covers holdings."
     - "2026-10-17: REDUCE is retired (analyst.reduce_factor 1.0)."
     - "2026-10-17: the headline classifier runs on claude-sonnet-5 (cost cut)."
-    - "2026-10-17: the cash sweep is not built live; the owner revisits it on 2026-11-06."
+    - "2026-10-17: the cash sweep is not built live. The 2026-11-06 review is deferred to 2026-12-07 (audit 2026-11-07): its premise was 32-37% idle cash, and live cash fell to 5.1% when the new account was invested on 2026-11-06."
     - "2026-10-17: the model review runs Fridays and on hard-alarm days; other days are rules-only."
     - "2026-10-23: the parity alarm judges the gap since the current release; the full-window gap is context."
+    - "2026-11-06: the switch to the new $100k paper account (scripts/switch_account.py) followed the 2026-11-05 kill switch (17.3% drawdown, 14 positions sold). It cleared the halt, the 20-session halt_cooldown_days and the high-water mark, and the owner built a 19-position book in one run (run_daily --max-new-entries). The backtest would have stayed flat for 20 sessions and then entered at most 4 a day, so until the book turns over (about December) live results follow a path the backtest never takes: a parity gap in that period comes from this decision and is not drift. One entry day also means shared entry prices and one max-hold date (2027-03-12) across the book."
   owner_resolutions:           # findings the owner has settled; the model review closes each unless new evidence reopens it
     - "F-41 / R-49: verified - 2026-10-24 the retry caught an empty first reply; 2026-10-31 the audit ran ok with 3 proposals and was emailed."
     - "F-42 / F-50 / F-51 / R-59: explained 2026-11-04 - the replay runs today's v2.1 config over the whole window while live ran v1/v2.0 until 10-30, so the full-window gap is mostly the config change (on 11-03: live-only entries -8.6 of a -6.8 pt gap; the same names -0.02). Since v2.1 live -2.3% vs replay -2.1%; the parity alarm already judges the gap since the release. Per-pair size, entry price and exit reason are in the report (PR #41)."
