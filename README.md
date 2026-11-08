@@ -284,7 +284,7 @@ about $20 a month.**
 | Audit | one `claude-opus-5` call a week | 18% |
 | Email | trade summaries on `claude-sonnet-5`, only on days something traded | <1% |
 
-The monitor raises an alarm at `budget.monthly_api_usd` ($25); it does not cap spending.
+The monitor raises an alarm at `budget.monthly_api_usd` ($35 since 2026-11-07); it does not cap spending.
 
 ## Research and backtests
 
