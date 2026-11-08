@@ -284,7 +284,7 @@ about $20 a month.**
 | Audit | one `claude-opus-5` call a week | 18% |
 | Email | trade summaries on `claude-sonnet-5`, only on days something traded | <1% |
 
-The monitor raises an alarm at `budget.monthly_api_usd` ($25); it does not cap spending.
+The monitor raises an alarm at `budget.monthly_api_usd` ($35 since 2026-11-07); it does not cap spending.
 
 ## Research and backtests
 
@@ -395,7 +395,7 @@ _Generated from 123 logged runs (latest 2026-11-06 22:39 UTC) by `scripts/trials
 <!-- trials:end -->
 
 How to read it: **nothing clears 0.95.** v2.1 (second row) leads the configurations that run live, at 0.86 against
-v2.0's 0.72; the top row adds the SPY cash sweep, which is backtest-only so far (decision due 2026-11-06). The
+v2.0's 0.72; the top row adds the SPY cash sweep, which is backtest-only so far (decision deferred to 2026-12-07). The
 "current: config.yaml" row is the last plain run of the config, logged under v2.0. Drawdown clusters at -16%
 to -22% across nearly every variant - the stable quantity, as the Quantopian study predicts. Choosing the best row is
 the selection bias the deflation charges for, so a change still has to pass the owner's bar on the point-in-time study.
