@@ -132,7 +132,10 @@ def compare_entries(bt_entries: list, live_bought: pd.DataFrame, book: pd.DataFr
     return {"overlap": round(len(lags) / total, 3) if total else None, "both": len(lags),
             "match_tolerance_days": tolerance, "backtest_only_gated_live": gated,
             "backtest_only": len(only_bt), "live_only": len(only_live),
+            # Live signal day minus the replay's, in trading days: negative = live staged the name first. The
+            # median alone looked like a bug beside pairs at -3..-5 (monitor F-63); the counts make it checkable.
             "median_lag_days": float(pd.Series(lags).median()) if lags else None,
+            "lag_counts": {str(k): v for k, v in sorted(pd.Series(lags).value_counts().items())} if lags else {},
             "backtest_only_names": [f"{dates[i].date().isoformat()} {s}" + (f" ({why})" if why else "")
                                     for i, s, why in only_bt][-10:],
             "live_only_names": [f"{d} {s}" for d, s in only_live][-10:]}
@@ -230,16 +233,27 @@ def matched_split(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Seri
     return split_pairs(pairs, capital)
 
 
+def no_capacity(live_eq: pd.DataFrame, day: pd.Timestamp, usd: float, floor_pct: float) -> bool:
+    """True when live could not have paid for an entry of `usd` on `day`: its cash above the cash floor, from that
+    day's brief, was smaller. False when there is no brief for the day."""
+    if live_eq is None or live_eq.empty or day not in live_eq.index:
+        return False
+    eq, cash = float(live_eq.loc[day, "equity"]), float(live_eq.loc[day, "cash"])
+    return cash - floor_pct * eq < usd
+
+
 def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, live_closed: pd.DataFrame,
               live_open: list, live_bought: pd.DataFrame, book: pd.DataFrame, dates: pd.DatetimeIndex, capital: float,
-              gap_pts: float, tolerance: int = 5, offering_block: bool = False) -> dict:
+              gap_pts: float, tolerance: int = 5, offering_block: bool = False, live_eq: pd.DataFrame | None = None,
+              floor_pct: float = 0.0) -> dict:
     """The gap in percentage points, by cause (monitor R-58, 2026-10-22), from one pairing of backtest entries with
     live positions (pair_entries):
-      matched                pairs: live P&L vs the backtest's, split into size and return
-      backtest_only_unfilled live staged the name within `tolerance` days but the order never filled
-      backtest_only_gated_*  a live gate kept it out that day: retired rule / earnings / unsimulated (gate_class)
-      backtest_only_other    a different pick
-      live_only              live positions with no backtest entry near them
+      matched                    pairs: live P&L vs the backtest's, split into size and return
+      backtest_only_unfilled     live staged the name within `tolerance` days but the order never filled
+      backtest_only_gated_*      a live gate kept it out that day: retired rule / earnings / unsimulated (gate_class)
+      backtest_only_no_capacity  live's cash above the floor that day could not pay for the replay's entry (F-64)
+      backtest_only_other        a different pick
+      live_only                  live positions with no backtest entry near them
     What the entries do not explain - fills, slippage, idle cash - is the residual."""
     pos = {d: i for i, d in enumerate(dates)}
     live = live_positions(live_closed, live_open)
@@ -257,7 +271,7 @@ def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, 
     gates = gate_index(book, pos)
     pts = {"matched_live": sum(p["live"]["pnl"] for p in pairs), "matched_backtest": sum(p["bt"]["pnl"] for p in pairs),
            "backtest_only_unfilled": 0.0, "backtest_only_gated_retired": 0.0, "backtest_only_gated_earnings": 0.0,
-           "backtest_only_gated_unsimulated": 0.0, "backtest_only_other": 0.0,
+           "backtest_only_gated_unsimulated": 0.0, "backtest_only_no_capacity": 0.0, "backtest_only_other": 0.0,
            "live_only": sum(a["pnl"] for k, a in live.items() if k not in used)}
     for u in unpaired:
         why = gate_near(gates, u["symbol"], u["sig"])
@@ -265,6 +279,8 @@ def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, 
             pts["backtest_only_unfilled"] += u["bt"]["pnl"]
         elif why:
             pts[f"backtest_only_gated_{gate_class(why, offering_block)}"] += u["bt"]["pnl"]
+        elif u["sig"] >= 0 and no_capacity(live_eq, dates[u["sig"]], u["bt"]["usd"], floor_pct):
+            pts["backtest_only_no_capacity"] += u["bt"]["pnl"]
         else:
             pts["backtest_only_other"] += u["bt"]["pnl"]
     out = {k: round(100 * v / capital, 2) for k, v in pts.items()}
@@ -272,7 +288,8 @@ def attribute(bt_entries: list, bt_trades: pd.DataFrame, last_close: pd.Series, 
     out.update(split_pairs(pairs, capital))
     out["matched_unfilled"] = sum(1 for u in unpaired
                                   if any(abs(j - u["sig"]) <= tolerance for j in staged.get(u["symbol"], [])))
-    bt_side = out["matched_backtest"] + out["backtest_only_unfilled"] + out["backtest_only_gated"] + out["backtest_only_other"]
+    bt_side = (out["matched_backtest"] + out["backtest_only_unfilled"] + out["backtest_only_gated"]
+               + out["backtest_only_no_capacity"] + out["backtest_only_other"])
     out["matched_difference"] = out.pop("matched_split_total")      # the same pairs, so the split sums to it
     out["residual"] = round(gap_pts - ((out["matched_live"] + out["live_only"]) - bt_side), 2)
     return out
@@ -329,7 +346,8 @@ def run(cfg: dict, data=None, start: date | None = None, end: date | None = None
     try:
         attr = attribute(log, trades, panel["close"].ffill().iloc[-1], live_closed, live_open, bought, book,
                          panel["close"].index, capital, gap,
-                         offering_block=bool((cfg.get("facts") or {}).get("offering_block")))
+                         offering_block=bool((cfg.get("facts") or {}).get("offering_block")),
+                         live_eq=eq, floor_pct=float(cfg["portfolio"].get("cash_floor_pct") or 0))
     except Exception as e:                       # attribution is a breakdown, never a reason the replay fails
         attr = {"error": f"{type(e).__name__}: {e}"}
     from .config import measured_from, release
@@ -406,6 +424,7 @@ def markdown(res: dict) -> list:
         lines.append(f"- the gap by cause, in points: same names {a['matched_difference']:+.1f} (live {a['matched_live']:+.1f} "
                      f"vs backtest {a['matched_backtest']:+.1f}); backtest-only kept out live {-a['backtest_only_gated']:+.1f}; "
                      f"staged live but never filled {-a.get('backtest_only_unfilled', 0.0):+.1f}; "
+                     f"live had no cash for it {-a.get('backtest_only_no_capacity', 0.0):+.1f}; "
                      f"other backtest-only {-a['backtest_only_other']:+.1f}; live-only {a['live_only']:+.1f}; "
                      f"fills, sizing and idle cash {a['residual']:+.1f}")
         if a['backtest_only_gated']:
@@ -419,7 +438,10 @@ def markdown(res: dict) -> list:
                          + (f"; live positions a median {med:.0%} of the backtest's" if med is not None else "")
                          + (f"; {a['matched_unfilled']} more staged live but never filled" if a.get("matched_unfilled") else "")
                          + ")")
-            for r in a.get("matched_worst") or []:
+            worst = a.get("matched_worst") or []
+            if worst:
+                lines.append(f"  - the {len(worst)} of {a['matched_pairs']} pairs that differ most:")
+            for r in worst:
                 size = (f"; size {r['size_ratio']:.0%}, entry price {r['entry_px_diff_pct']:+.1f}%"
                         if r.get("size_ratio") is not None else "; size not recorded")
                 lines.append(f"    - {r['symbol']} {r['diff_pts']:+.1f}: live {r['live']} vs backtest {r['backtest']}{size}")
@@ -427,9 +449,25 @@ def markdown(res: dict) -> list:
         lines.append(f"  - {e['backtest_only_gated_live']} of the {e['backtest_only']} backtest-only names were kept out "
                      f"live by a gate that fired on the backtest's signal day (a hard-filter block or an analyst veto)")
     if e.get("median_lag_days") is not None:
-        lines.append(f"  - matched names were staged live a median {e['median_lag_days']:+.0f} trading days after the backtest")
+        lines.append("  - " + lag_text(e["median_lag_days"], e.get("lag_counts") or {}))
     if e["backtest_only_names"]:
-        lines.append(f"  - backtest only: {'; '.join(e['backtest_only_names'][-6:])}")
+        lines.append(f"  - backtest only{shown(e['backtest_only_names'], e['backtest_only'])}: "
+                     f"{'; '.join(e['backtest_only_names'][-6:])}")
     if e["live_only_names"]:
-        lines.append(f"  - live only: {'; '.join(e['live_only_names'][-6:])}")
+        lines.append(f"  - live only{shown(e['live_only_names'], e['live_only'])}: {'; '.join(e['live_only_names'][-6:])}")
     return lines
+
+
+def shown(names: list, total: int, cap: int = 6) -> str:
+    """' (latest 6 of 9)' when a list is cut, else ''. Unlabelled cuts made the monitor's counts uncheckable (F-63)."""
+    n = min(len(names), cap)
+    return f" (latest {n} of {total})" if total > n else ""
+
+
+def lag_text(median: float, counts: dict) -> str:
+    """The matched-entry timing in words, sign spelled out (live signal day minus the replay's)."""
+    m = int(round(median))
+    when = ("on the same day as the backtest" if m == 0 else
+            f"a median {abs(m)} trading day{'s' if abs(m) != 1 else ''} {'before' if m < 0 else 'after'} the backtest")
+    spread = ", ".join(f"{int(k):+d}d x{v}" for k, v in sorted(counts.items(), key=lambda kv: int(kv[0])))
+    return f"matched names were staged live {when}" + (f" (live minus backtest, by pair: {spread})" if spread else "")

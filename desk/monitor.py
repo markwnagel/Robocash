@@ -309,6 +309,30 @@ def spend_alarms(spent: float, budget: float | None, today: date) -> list:
                        "role fails and the desk stops buying until the month resets."}]
 
 
+def stale_checkout_alarms(events: list | None) -> list:
+    """A desk run that traded code other than main as last fetched. It was a brief note only, and on 2026-11-09 the
+    desk traded from main 3 commits behind origin/main (audit 2026-11-14, monitor F-62): the replay assumes the
+    rules on main. SEV1 when the checkout is not main at all (the wrong code entirely - GitHub Desktop has switched
+    it before), SEV2 when it is main but behind (a merge not yet pulled). One alarm per day."""
+    out, seen = [], set()
+    for e in events or []:
+        if e.get("event") != "run_start" or e.get("job") != "desk" or not e.get("branch"):
+            continue
+        branch, behind, day = e["branch"], e.get("behind_main"), str(e["ts"])[:10]
+        if (branch == "main" and not behind) or day in seen:
+            continue
+        seen.add(day)
+        on_main = branch == "main"
+        where = (f"main, {behind} commit{'s' if behind != 1 else ''} behind origin/main" if on_main
+                 else ("a detached commit" if branch == "HEAD" else f"branch '{branch}'") + ", not main")
+        out.append({"key": f"desk-stale-code-{day}", "severity": "SEV2" if on_main else "SEV1",
+                    "title": f"Desk traded from {where}",
+                    "detail": f"run {e.get('run_id')} at {e['ts']} ran code {e.get('code')} from {where}. Merged changes "
+                              f"were not in the code that traded, and the parity replay assumes they were. Fix: "
+                              f"git checkout main && git pull --ff-only before the next 13:40 run."})
+    return out
+
+
 def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list | None = None) -> list:
     """Conditions that escalate whether or not the model is reachable. The desk is the job that maintains
     exits and protective stops, so a missed, crashed or hung desk run is SEV1 on its own; so is a holding
@@ -340,6 +364,7 @@ def hard_alarms(runs: dict, jobs: dict, trading_days: set | None, events: list |
     for r in jobs.get("report", {}).get("errors", []):
         alarms.append({"key": f"report-error-{r['run_id']}", "severity": "SEV1", "title": "Daily report crashed",
                        "detail": f"run {r['run_id']} at {r['ts']}: {r['error']}. No email went out."})
+    alarms += stale_checkout_alarms(events)
     ends = [e for e in events or [] if e.get("event") == "run_end"]
     for e in ends:
         if e.get("job") == "desk":

@@ -289,6 +289,32 @@ def trim_text(text: str, max_sentences: int = 2, max_chars: int = 300) -> str:
     return kept[:max_chars].rsplit(" ", 1)[0].rstrip(",;:") + "..."
 
 
+def summary_budget(n_moves: int) -> int:
+    """Output tokens for n summaries. A fixed 2000 ran out on a 19-buy day and the whole reply fell back to the
+    templates (monitor F-60, 2026-11-06); two sentences plus the JSON around them come to under 150 tokens."""
+    return min(16000, 600 + 250 * max(1, n_moves))
+
+
+def salvage_summaries(text: str) -> list:
+    """The complete {symbol, kind, summary} objects in a reply cut off mid-way, so a truncated reply still
+    paraphrases every trade it finished instead of none (monitor R-67)."""
+    dec, out, i = json.JSONDecoder(), [], 0
+    while True:
+        i = text.find("{", i)
+        if i < 0:
+            return out
+        try:
+            obj, end = dec.raw_decode(text, i)
+        except ValueError:
+            i += 1
+            continue
+        if isinstance(obj, dict) and {"symbol", "kind", "summary"} <= set(obj):
+            out.append(obj)
+            i = end
+        else:
+            i += 1
+
+
 def plain_summaries(moves: list, cfg: dict) -> dict:
     """{'sold:HUM': 'plain sentences'} for each move. Claude paraphrases the analyst's wording; any failure
     falls back to the structured template, so a move is never left unexplained."""
@@ -316,7 +342,7 @@ def plain_summaries(moves: list, cfg: dict) -> dict:
     try:
         import anthropic
         resp = anthropic.Anthropic().messages.create(
-            model=model, max_tokens=2000, system=SUMMARY_SYSTEM,
+            model=model, max_tokens=summary_budget(len(moves)), system=SUMMARY_SYSTEM,
             messages=[{"role": "user", "content": "Trades (JSON):\n" + json.dumps(payload, indent=1, default=str)}],
             output_config={"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}},
         )
@@ -325,8 +351,17 @@ def plain_summaries(moves: list, cfg: dict) -> dict:
             telemetry.llm_call("summarizer", model, started, [resp], outcome="refusal")
             telemetry.agent_output("summarizer", len(moves), 0, fell_back=len(moves))
             return out
-        data = json.loads("".join(b.text for b in resp.content if b.type == "text"))
-        for s in data.get("summaries", []):
+        text_out = "".join(b.text for b in resp.content if b.type == "text")
+        truncated = resp.stop_reason == "max_tokens"
+        try:
+            items = json.loads(text_out).get("summaries", [])
+        except ValueError:
+            if not truncated:
+                raise
+            items = salvage_summaries(text_out)
+            log.warning("summary reply cut off at %d tokens; kept %d of %d", summary_budget(len(moves)),
+                        len(items), len(moves))
+        for s in items:
             key = f"{str(s.get('kind', '')).lower()}:{str(s.get('symbol', '')).upper()}"
             raw = " ".join(str(s.get("summary", "")).split())
             text = trim_text(raw)
@@ -334,7 +369,8 @@ def plain_summaries(moves: list, cfg: dict) -> dict:
                 out[key] = text
                 applied += 1
                 overran += text != raw
-        telemetry.llm_call("summarizer", model, started, [resp], trades=len(moves), input_chars=len(json.dumps(payload, default=str)))
+        telemetry.llm_call("summarizer", model, started, [resp], outcome="truncated" if truncated else "ok",
+                           trades=len(moves), input_chars=len(json.dumps(payload, default=str)))
         telemetry.agent_output("summarizer", len(moves), applied, fell_back=len(moves) - applied,
                                trimmed_for_length=overran)
     except Exception as e:                      # a prettier email is never worth a failed report
