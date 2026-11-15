@@ -30,7 +30,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide
 
-from desk.analyst import analyst_rules, apply_verdicts, red_team, review
+from desk.analyst import analyst_rules, apply_verdicts, red_team, review, size_note
 from desk.config import alpaca_keys, load_config, release, require_paper
 from desk.data import SESSION_DONE, build_universe, cached_bars
 from desk.execution import Broker, sync_positions
@@ -190,6 +190,7 @@ def main() -> None:
     publish(brief, today, cfg, args.dry_run)
     count = lambda text: sum(text in n for n in notes)  # noqa: E731
     telemetry.note(entries=len(entries), exits=len(exits), adds=len(adds), notes=len(notes), stale=plan["stale"],
+                   funnel=plan.get("funnel"),
                    analyst=plan["analyst_status"], equity=round(acct["equity"], 2),
                    # Held and staged apart, counted as the brief counts them: one "positions" number that included
                    # pending entries read as 12 beside a brief saying "11 + 1 staged" (monitor F-21, 2026-10-06).
@@ -453,11 +454,17 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     picks = select_entries(snap, panels["returns"], list(st["positions"]), slots, pcfg)
     equity = acct["equity"]
     cash_avail = min(acct["cash"], acct["non_marginable_buying_power"]) - equity * pcfg["cash_floor_pct"]
+    # Why a day buys what it buys - or nothing. "No candidates" alone left the monitor guessing whether the cause
+    # was the cash floor, a full book or the filters (monitor F-64, 2026-11-13).
+    funnel = {"eligible": int((snap["eligible"].astype(bool) & ~snap.index.isin(list(st["positions"]))).sum()),
+              "blocked": len(blocked), "slots": max(0, int(slots)), "picked": len(picks),
+              "investable_cash": round(max(0.0, cash_avail), 2), "unaffordable": 0}
     entries = []
     for sym in picks:
         row = snap.loc[sym]
         sz = size_position(equity, cash_avail, float(row["close"]), float(row["atr"]), day_pcfg, ecfg)
         if not sz:
+            funnel["unaffordable"] += 1
             continue
         # The last picks of a big day get what cash is left (backtest.py sizes the same way); say so, or a
         # 1-share position reads as a sizing bug (monitor F-55, 2026-11-06).
@@ -491,9 +498,11 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
 
     # Paced before the analyst so review cost and freshness track what is actually bought today;
     # deferred names are re-selected (and re-reviewed) on later sessions if still ranked.
+    funnel["sized"] = len(entries)
     entries, pace_note = pace_entries(entries, pcfg.get("max_new_entries_per_day"), st["positions"], today)
     if pace_note:
         notes.append(pace_note)
+    funnel["after_pacing"] = len(entries)
 
     analyst_out, analyst_status = None, "skipped"
     if cfg["analyst"]["enabled"] and not args.no_analyst and (entries or st["positions"]):
@@ -515,6 +524,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             "holdings": [
                 {"symbol": s, **{k: p.get(k) for k in ("entry_date", "entry_price", "qty", "stop", "target", "last_price", "adds")},
                  "thesis_at_entry": p.get("thesis"),
+                 "size_note": size_note(p.get("thesis")),
                  "days_held": (today - date.fromisoformat(p["entry_date"])).days,
                  "exit_planned": exits.get(s),
                  "facts": compact(facts[s]) if s in facts else None}
@@ -573,8 +583,11 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                 telemetry.emit({"event": "data_concern", "source": "analyst", "text": telemetry.redact(c)[:500],
                                 "signature": telemetry.signature(c)})
 
+    funnel["after_analyst"] = len(entries)
     n_held = len([s for s in st["positions"] if s not in exits])
     entries = enforce_entry_limits(entries, equity, acct["cash"], n_held, day_pcfg)
+    funnel["staged"] = len(entries)
+    notes.append(funnel_text(funnel))
 
     # Pyramid adds: a winner that has moved one initial-risk unit past its last entry gets another unit,
     # sized like a fresh entry at today's price, capped by the position limit, sharing the trailed stop.
@@ -600,11 +613,27 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
                          "notional": q * px, "add_n": int(pos.get("adds") or 0) + 1})
     return {"exits": exits, "entries": entries, "adds": adds, "trims": trims, "analyst_out": analyst_out,
             "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
-            "regime": regime_status, "regime_label": regime_label, "shadow": shadow_rows,
+            "regime": regime_status, "regime_label": regime_label, "shadow": shadow_rows, "funnel": funnel,
             # Each holding's full-universe rank (None: not ranked today), so a decay exit can be checked later.
             "holding_ranks": {sym: (int(rank_snap.loc[sym, "rank"]) if sym in rank_snap.index
                                     and bool(rank_snap.loc[sym, "eligible"]) else None)
                               for sym, pos in st["positions"].items() if pos.get("filled")}}
+
+
+def funnel_text(f: dict) -> str:
+    """One brief line: where today's candidates went. Only stages that dropped someone are spelled out."""
+    parts = [f"{f['eligible']} eligible ({f['blocked']} blocked by facts)", f"{f['slots']} open slot{'s' if f['slots'] != 1 else ''}",
+             f"{f['picked']} picked"]
+    if f.get("unaffordable"):
+        parts.append(f"{f['unaffordable']} unaffordable (${f['investable_cash']:,.0f} investable above the cash floor)")
+    steps = [("sized", "sized"), ("after_pacing", "after the daily pace"), ("after_analyst", "after the analyst")]
+    prev = f["picked"] - int(f.get("unaffordable") or 0)
+    for key, label in steps:
+        if key in f and f[key] != prev:
+            parts.append(f"{f[key]} {label}")
+            prev = f[key]
+    parts.append(f"{f['staged']} staged")
+    return "candidate funnel: " + " -> ".join(parts)
 
 
 def record_shadow(today: date, cfg: dict, st: dict, entries: list, rows: list) -> None:
