@@ -292,7 +292,9 @@ def build_html(ctx: dict) -> str:
             rows += ("<tr>" + _cell(f'<span style="color:{NEG if sev in ("SEV1", "SEV2") else MUTED};font-weight:600;'
                                     f'white-space:nowrap;">{escape(sev)}</span>', width="52px")
                      + _cell(f'<b>{escape(f["id"])}</b> {escape(f["title"])}'
-                             + (f' <span style="color:{MUTED};">({escape(f["trend"])})</span>' if f.get("trend") else ""))
+                             + (f' <span style="color:{MUTED};">({escape(f["trend"])})</span>' if f.get("trend") else "")
+                             + (f' <span style="color:{POS};">&middot; owner: {escape(f["resolved"])}, awaiting the next '
+                                f'model review</span>' if f.get("resolved") else ""))
                      + "</tr>")
         if h.get("parked"):
             rows += ("<tr>" + _cell("", width="52px")
@@ -300,7 +302,9 @@ def build_html(ctx: dict) -> str:
                      + "</tr>")
         for r in h.get("recommendations", [])[:5]:
             rows += ("<tr>" + _cell(f'<span style="color:{MUTED};font-weight:600;">{escape(r["priority"])}</span>', width="52px")
-                     + _cell(f'{escape(r["id"])} {escape(r["title"])}', muted=True) + "</tr>")
+                     + _cell(f'{escape(r["id"])} {escape(r["title"])}'
+                             + (f' &middot; owner: {escape(r["resolved"])}' if r.get("resolved") else ""), muted=True)
+                     + "</tr>")
         inner = _table(rows)
         if h.get("report"):
             inner += (f'<div style="font-family:{FONT};font-size:11px;color:{MUTED};padding:6px 10px 0 10px;">'

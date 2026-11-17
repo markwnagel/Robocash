@@ -29,6 +29,42 @@ def _asof(s: pd.Series, when) -> float | None:
     return float(hit.iloc[-1]) if len(hit) else None
 
 
+def _asof_date(s: pd.Series, when) -> date | None:
+    """Date of the value _asof() returns: the close a return is actually measured from."""
+    if s is None or s.empty or not isinstance(s.index, pd.DatetimeIndex):
+        return None
+    hit = s.index[s.index <= pd.Timestamp(when)]
+    return hit[-1].date() if len(hit) else None
+
+
+RESOLUTION = re.compile(r"^\s*((?:[FR]-\d+)(?:\s*/\s*[FR]-\d+)*)\s*:\s*([a-z][a-z ]*?)\s+(\d{4}-\d{2}-\d{2})")
+
+
+def owner_resolutions(lines: list) -> dict:
+    """{id: (verdict, date)} from monitor.owner_resolutions lines such as "F-60 / R-67: fixed 2026-11-14 - ...".
+    Lines without a date are left out."""
+    out = {}
+    for line in lines or []:
+        m = RESOLUTION.match(str(line))
+        if m:
+            for i in re.split(r"\s*/\s*", m.group(1)):
+                out[i] = (m.group(2).strip(), m.group(3))
+    return out
+
+
+def mark_resolved(items: list, resolutions: dict, reviewed_on: str | None) -> list:
+    """Carried findings and recommendations with the owner's resolution since the model review attached as
+    'resolved' ("fixed 2026-11-14"). On rules-only days the email listed F-60..F-65 as open for four days after
+    PR #59 fixed them and config.yaml said so (monitor review 2026-11-16); the next model review closes them."""
+    out = []
+    for it in items or []:
+        r = resolutions.get(it.get("id"))
+        if r and (not reviewed_on or r[1] > reviewed_on):
+            it = {**it, "resolved": f"{r[0]} {r[1]}"}
+        out.append(it)
+    return out
+
+
 def inception(equity: pd.Series) -> date:
     """Last flat point before the account first moved. Funding a paper account days before the first
     trade would otherwise credit SPY with moves the desk was never exposed to."""
@@ -68,7 +104,8 @@ def performance(equity: pd.Series, spy: pd.Series, today: date, release: dict | 
             continue
         d = e1 / e0 - 1
         sp = (s1 / s0 - 1) if (s0 and s1) else None
-        rows.append({"period": label, "from": start, "desk_pct": d, "spy_pct": sp,
+        # "from" is the close the return is measured from: "This week" on a Monday used to show Sunday's date.
+        rows.append({"period": label, "from": _asof_date(equity, start) or start, "desk_pct": d, "spy_pct": sp,
                      "diff_pct": (d - sp) if sp is not None else None})
     return rows
 
@@ -552,10 +589,12 @@ def build_report(ctx: dict) -> str:
         if h.get("findings") and h.get("analysis") == "deterministic" and h.get("reviewed_on"):
             L.append(f"  Open findings as of the {h['reviewed_on']} model review (not re-checked today):")
         L += [f"  [{f['severity']}] {f['id']} {f['title']}" + (f" ({f['trend']})" if f.get("trend") else "")
+              + (f" - owner: {f['resolved']}, awaiting the next model review" if f.get("resolved") else "")
               for f in h.get("findings", [])[:8]]
         if h.get("parked"):
             L.append(f"  + {h['parked']} parked (no new evidence for 3+ reviews; listed in the full report)")
-        L += [f"  recommended [{r['priority']}] {r['id']} {r['title']}" for r in h.get("recommendations", [])[:5]]
+        L += [f"  recommended [{r['priority']}] {r['id']} {r['title']}"
+              + (f" - owner: {r['resolved']}" if r.get("resolved") else "") for r in h.get("recommendations", [])[:5]]
         if h.get("report"):
             L.append(f"  full report: {h['report']}")
         L.append("")

@@ -29,7 +29,7 @@ from desk.monitor import parked
 from desk.report import (build_report, diff_fingerprint, fingerprint, holdings_at_close, load_json, movers,
                          notable_news, performance, plain_summaries, quote_url)
 from desk.report_html import build_html
-from desk import schedule, telemetry
+from desk import report as R, schedule, telemetry
 from desk import trials as T
 from desk.evidence import live_vs_backtest
 from desk.execution import raw_positions
@@ -120,7 +120,7 @@ def closed_today(today: date, orders: list, st: dict, still_held: set = frozense
     return rows
 
 
-def health_today(today: date) -> dict:
+def health_today(today: date, cfg: dict | None = None) -> dict:
     """The agent monitor's summary if it ran today. A missing check is shown as missing, not as healthy."""
     h = load_json(STATE_DIR / "monitor" / "latest.json", {})
     if h.get("date") != today.isoformat():
@@ -128,7 +128,10 @@ def health_today(today: date) -> dict:
                 "findings": [], "recommendations": []}
     # Parked findings stay in the monitor's report and state; the email shows only the live ones.
     fs = h.get("findings", [])
-    return {**h, "findings": [f for f in fs if not parked(f)], "parked": sum(map(parked, fs))}
+    res = R.owner_resolutions(((cfg or {}).get("monitor") or {}).get("owner_resolutions"))
+    return {**h, "findings": R.mark_resolved([f for f in fs if not parked(f)], res, h.get("reviewed_on")),
+            "recommendations": R.mark_resolved(h.get("recommendations", []), res, h.get("reviewed_on")),
+            "parked": sum(map(parked, fs))}
 
 
 def evidence_today(cfg: dict, equity: pd.Series) -> dict:
@@ -299,7 +302,7 @@ def main() -> None:
         "movers": movers(positions), "news": news, "quote_links": links,
         "holdings": holdings,
         "changes": changes, "halted": st.get("halt_reason") if st.get("halted") else None,
-        "notes": brief_notes(today), "health": health_today(today),
+        "notes": brief_notes(today), "health": health_today(today, cfg),
         "evidence": evidence_today(cfg, eq_series), "research": research[0],
         "manual": ([desk_warning] if desk_warning else [])
                   + [n.split(":", 1)[1].strip() for n in schedule_problems        # unless the brief has it
