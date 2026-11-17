@@ -22,7 +22,8 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import NewsRequest, OptionChainRequest
 
 from . import telemetry
-from .edgar import Edgar, last_results, offering_filings, recent_8k_items, shelf_filings, standing_shelf
+from .edgar import (SHELF_ROWS, Edgar, last_results, offering_filings, recent_8k_items, shelf_filings, shelf_tally,
+                    standing_shelf)
 from .state import atomic_write_text
 
 log = logging.getLogger("desk.facts")
@@ -505,7 +506,8 @@ class FactBuilder:
         return out
 
     def _edgar(self, s: str, spot: float | None = None) -> dict:
-        out = {"cik": None, "offering_filings": [], "shelf_filings": [], "insider_net_buy_30d": None,
+        out = {"cik": None, "offering_filings": [], "shelf_filings": [], "shelf_filings_n": 0, "shelf_filings_by_form": {},
+               "insider_net_buy_30d": None,
                "insider_net_buy_90d": None, "insider_transactions_90d": None, "insider_excluded_n": 0,
                "insider_note": None, "recent_8k_items": [], "shelf_registration": None,
                "prospectus_supplements_12m": [], "prospectus_supplements_12m_n": 0, "last_results_8k": None}
@@ -518,7 +520,9 @@ class FactBuilder:
             out["cik"] = cik
             filings = self.edgar.filings(cik, self.today - timedelta(days=90))
             out["offering_filings"] = offering_filings(filings)
-            out["shelf_filings"] = shelf_filings(filings)
+            out["shelf_filings"] = shelf_filings(filings, SHELF_ROWS)
+            tally = shelf_tally(filings)
+            out["shelf_filings_n"], out["shelf_filings_by_form"] = sum(tally.values()), tally
             out["recent_8k_items"] = recent_8k_items([f for f in filings if f["date"] >= self.today - timedelta(days=30)])[:6]
             # The same submissions file, read further back (no extra request: it is cached for 12 hours).
             long = self.edgar.filings(cik, self.today - timedelta(days=3 * 365))

@@ -145,9 +145,32 @@ def offering_filings(filings: list) -> list:
     return hits
 
 
-def shelf_filings(filings: list) -> list:
-    """Analyst-flag tier: shelf registrations and takedowns, which may be debt or equity."""
-    return [f"{f['form']} {f['date'].isoformat()}" for f in filings if f["form"] in SHELF_FORMS]
+SHELF_ROWS = 8    # rows of shelf_filings in a fact sheet; the count and per-form tally cover the rest
+
+
+def shelf_filings(filings: list, limit: int | None = None) -> list:
+    """Analyst-flag tier: shelf registrations and takedowns, which may be debt or equity. Newest first. With
+    `limit`, the newest `limit` rows, but always the newest of each form, so a registration is never pushed out
+    by note takedowns: TD on 2026-11-16 had several hundred 424B2s (structured notes) in 90 days, and the
+    analyst read the list as truncated against prospectus_supplements_12m (monitor review 2026-11-16)."""
+    rows = sorted((f for f in filings if f["form"] in SHELF_FORMS), key=lambda f: f["date"], reverse=True)
+    if limit is not None and len(rows) > limit:
+        firsts = {}
+        for f in rows:
+            firsts.setdefault(f["form"], f)
+        keep = list(firsts.values())
+        keep += [f for f in rows if all(f is not k for k in keep)][:max(0, limit - len(keep))]
+        rows = sorted(keep, key=lambda f: f["date"], reverse=True)
+    return [f"{f['form']} {f['date'].isoformat()}" for f in rows]
+
+
+def shelf_tally(filings: list) -> dict:
+    """{form: count} of the shelf filings in `filings`."""
+    out: dict = {}
+    for f in filings:
+        if f["form"] in SHELF_FORMS:
+            out[f["form"]] = out.get(f["form"], 0) + 1
+    return out
 
 
 REGISTRATION_FORMS = {"S-3", "S-3/A", "S-3ASR", "F-3", "F-3ASR"}
