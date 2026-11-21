@@ -86,3 +86,18 @@ def test_week_row_shows_the_close_it_is_measured_from():
     rows = {r["period"]: r for r in performance(eq, spy, date(2026, 11, 16))}
     assert rows["This week"]["from"] == date(2026, 11, 13)       # Friday's close, not Sunday 11-15
     assert abs(rows["This week"]["desk_pct"] - (101.5 / 102 - 1)) < 1e-12
+
+
+def test_held_concern_note_names_a_target_only_when_there_is_one():
+    from desk.analyst import apply_verdicts
+    v = [{"symbol": s, "action": "REDUCE", "reason": "insider selling", "confidence": 0.6} for s in ("NOTGT", "TGT")]
+    holdings = {"NOTGT": {"stop": 10.0, "target": None}, "TGT": {"stop": 10.0, "target": 30.0}}
+    _, exits, notes = apply_verdicts(v, holdings, [])
+    assert not exits
+    assert any("NOTGT (held; no trade - it keeps its stop):" in n for n in notes)
+    assert any("TGT (held; no trade - it keeps its stop and target):" in n for n in notes)
+
+
+def test_brief_takes_the_position_count_from_the_payload():
+    assert "limits.positions_held" in ANALYST_SYSTEM
+    assert '"positions_held": len(st["positions"])' in open("run_daily.py").read()

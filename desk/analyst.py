@@ -203,12 +203,13 @@ symbols, impossible values), list that in data_concerns too. data_concerns lists
 rather than writing that no text addressed you or that the data looks fine.
 
 Then write a plain-English brief of at most 150 words for the account owner: portfolio vs. limits, regime, drawdown from the high-water
-mark, positions exiting within 7 days, and anything you vetoed and why. For the regime, use the desk data's regime.label word for word;
+mark, positions exiting within 7 days, and anything you vetoed and why. State the position count as limits.positions_held (do not
+count the holdings list yourself; on 2026-11-20 a brief said seventeen of eighteen). For the regime, use the desk data's regime.label word for word;
 a drawdown or a down day is not a change of regime.
 
 You recommend; the desk's code executes. Never write that a trade happened ("trimmed", "sold", "cut", "bought", "exited") - your
 verdicts are applied after you write, and some are not applied at all. In particular a REDUCE on a position already held is not
-applied: it is recorded as a concern for the owner, and the position keeps its stop and target. Write "concern on X (no trade)",
+applied: it is recorded as a concern for the owner, and the position keeps its stop (and its target, if it has one). Write "concern on X (no trade)",
 not "trimmed X" and not a request for the owner to trade. "(no trade)" is only for a holding: a REDUCE on a candidate does not stop
 its entry (rules.reduce_sizing says what it does to the size), so write "concern on X (entry stands)" for a candidate."""
 
@@ -507,7 +508,10 @@ def apply_verdicts(verdicts: list, holdings: dict, entries: list, reduce_factor:
                 first = not holdings[sym].get("analyst_flag")
                 holdings[sym]["analyst_flag"] = reason          # latest reason, kept on the position
                 if first:
-                    notes.append(f"analyst concern on {sym} (held; no trade - it keeps its stop and target): "
+                    # "and target" only when it has one: v2.1 has no take-profit, and the note said "stop and
+                    # target" on every holding (2026-11-20).
+                    keeps = "its stop and target" if holdings[sym].get("target") else "its stop"
+                    notes.append(f"analyst concern on {sym} (held; no trade - it keeps {keeps}): "
                                  f"{v.get('reason', '')}")
     unreviewed = [s for s in by_sym if s.upper() not in reviewed]
     if unreviewed:
