@@ -518,7 +518,8 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             # The prompt asks for the regime, and without this the brief guessed it from the drawdown: "Regime is
             # risk-off" on a risk-on day (monitor F-37, 2026-10-16).
             "regime": {"label": regime_label, "state": regime_status},
-            "limits": {"max_positions": pcfg["max_positions"], "target_positions": target_positions,
+            "limits": {"positions_held": len(st["positions"]),
+                       "max_positions": pcfg["max_positions"], "target_positions": target_positions,
                        "max_position_pct": day_pcfg["max_position_pct"], "max_hold_days": ecfg["max_hold_days"]},
             "rules": analyst_rules(cfg),
             "holdings": [
