@@ -93,8 +93,22 @@ def read_briefs(first, last) -> dict:
     return out
 
 
-def analyze(system: str, payload: dict, model: str) -> tuple:
-    """(result dict, None) or (None, reason). Never raises: a failed analysis still leaves a fallback report."""
+def analyze(system: str, payload: dict, model: str, attempts: int = 2, wait: float = 120.0) -> tuple:
+    """(result dict, None) or (None, reason). A call the network dropped before any reply is asked again after
+    `wait` seconds (2026-11-20: APIConnectionError during the same outage that crashed the desk, and Friday's
+    review was lost). A refusal or an unparseable reply is final."""
+    for i in range(attempts):
+        result, reason = _analyze_once(system, payload, model)
+        if result is not None or not reason or not reason.startswith(("APIConnectionError", "APITimeoutError")) \
+                or i == attempts - 1:
+            return result, reason
+        log.warning("monitor analysis failed (%s) - asking again in %.0fs", reason, wait)
+        time.sleep(wait)
+    return None, "no attempt made"
+
+
+def _analyze_once(system: str, payload: dict, model: str) -> tuple:
+    """One analysis call. Never raises: a failed analysis still leaves a fallback report."""
     started, resp = time.monotonic(), None
     try:
         client = anthropic.Anthropic(timeout=600.0, max_retries=1)
@@ -277,7 +291,8 @@ def main() -> None:
     }
 
     result, reason, analysis = None, "skipped (--no-llm)", "deterministic"
-    due, why = model_review_due(mcfg, now, alarms, mstate.get("last_model_review"), forced=args.llm)
+    due, why = model_review_due(mcfg, now, alarms, mstate.get("last_model_review"), forced=args.llm,
+                                failed_on=mstate.get("model_review_failed"))
     if not args.no_llm and not due:
         reason = why
     if not args.no_llm and due:
@@ -348,6 +363,9 @@ def main() -> None:
         "incident_days": sorted(incident_days)[-60:], "escalated": sorted(escalated)[-200:],
         "pending_escalations": [list(t) for t in todo if t[0] not in escalated],
         "last_model_review": now.isoformat() if analysis == "claude" else mstate.get("last_model_review"),
+        # A due review that did not happen is due again on the next run, not a week later.
+        "model_review_failed": (now.date().isoformat() if due and analysis != "claude" and not args.no_llm
+                                else None),
     }
     atomic_write_text(MON_DIR / "state.json", json.dumps(new_state, indent=1, default=str))
     shown = str(rpath.relative_to(root)) if rpath.is_relative_to(root) else str(rpath)

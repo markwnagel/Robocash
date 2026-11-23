@@ -241,14 +241,16 @@ PLAIN_EXITS = [
 
 
 def _thesis_bits(thesis: str) -> dict:
-    """Pull the structured head off a thesis string: 'rank 3, 6m mom 158%, 20d 8% | analyst REDUCE: ...'"""
+    """Pull the structured head off a thesis string: 'rank 3, 12m mom 158%, 20d 8% | analyst REDUCE: ...'. The
+    window is in the label (6m before v2.1, 12m since 2026-11-23), so old and new theses both parse."""
     t = thesis or ""
     m = re.search(r"rank (\d+)", t)
-    mom = re.search(r"6m mom (-?\d+)%", t)
+    mom = re.search(r"(\d+)m mom (-?\d+)%", t)
     short = re.search(r"20d (-?\d+)%", t)
     verdict = re.search(r"analyst (REDUCE|REMOVE|KEEP)", t)
     return {"rank": int(m.group(1)) if m else None,
-            "mom6": int(mom.group(1)) if mom else None,
+            "mom": int(mom.group(2)) if mom else None,
+            "mom_months": int(mom.group(1)) if mom else None,
             "mom20": int(short.group(1)) if short else None,
             "verdict": verdict.group(1) if verdict else None}
 
@@ -269,8 +271,8 @@ def fallback_summary(kind: str, row: dict) -> str:
     b = _thesis_bits(row.get("thesis", ""))
     lead = (f"It ranked {b['rank']} out of the ~800 stocks we screen" if b["rank"]
             else "It came through our screen as one of the strongest names")
-    if b["mom6"] is not None:
-        lead += f", after gaining {b['mom6']}% over six months"
+    if b["mom"] is not None:
+        lead += f", after gaining {b['mom']}% over {b['mom_months']} months"
         if b["mom20"] is not None:
             lead += f" and {b['mom20']}% in the past month"
     tail = (" Our reviewer cut the normal position size, so we took a smaller stake."
@@ -363,7 +365,7 @@ def plain_summaries(moves: list, cfg: dict) -> dict:
     for m in moves:
         b = _thesis_bits(m.get("thesis", ""))
         item = {"symbol": m["symbol"], "kind": m["kind"], "shares": m.get("qty"),
-                "rank_out_of_800": b["rank"], "six_month_gain_pct": b["mom6"], "one_month_gain_pct": b["mom20"],
+                "rank_out_of_800": b["rank"], "momentum_months": b["mom_months"], "momentum_gain_pct": b["mom"], "one_month_gain_pct": b["mom20"],
                 "reviewer_verdict": b["verdict"], "analyst_note": str(m.get("thesis", ""))[:700]}
         if m["kind"] == "sold":
             item.update(sold_at=m.get("exit_price"), days_held=m.get("hold_days"),

@@ -40,7 +40,7 @@ from desk.portfolio import (decay_exit, entry_limit, pace_entries, pyramid_due, 
                             trail_stop)
 from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import auto_resume_due, can_exit_today, clear_halt, enforce_entry_limits, evaluate, resume_date
-from desk.signals import compute_panels, rerank, snapshot
+from desk.signals import compute_panels, history_bars_needed, momentum_months, rerank, snapshot
 from desk import schedule, shadow, telemetry
 from desk.state import account_change, load_state, save_state, write_brief
 
@@ -285,6 +285,12 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     symbols = sorted(set(universe) | set(st["positions"]))
     panel = cached_bars(data, symbols, cfg["data"]["history_days"], cfg)
     scfg, pcfg, ecfg, rcfg = cfg["signals"], cfg["portfolio"], cfg["exits"], cfg["risk"]
+    mom_m = momentum_months(scfg)
+    need, got = history_bars_needed(scfg), len(panel["close"].index)
+    if got < need:
+        # Every name would rank on NaN momentum and drop out: say so rather than stage nothing silently.
+        notes.append(f"WARNING: the price panel has {got} daily bars and the signals need {need} - raise "
+                     f"data.history_days ({cfg['data']['history_days']})")
     panels = compute_panels(panel, scfg)
     snap = snapshot(panels, -1, scfg)
 
@@ -487,9 +493,9 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         cash_avail -= sz["notional"]
         entries.append({
             "symbol": sym, "price": float(row["close"]), "limit": entry_limit(float(row["close"])),
-            "rank": int(row["rank"]), "momentum_6m": float(row["momentum"]), "return_20d": float(row["short"]),
+            "rank": int(row["rank"]), f"momentum_{mom_m}m": float(row["momentum"]), "return_20d": float(row["short"]),
             "atr_pct": float(row["atr_pct"]), **sz,
-            "thesis": f"rank {int(row['rank'])}, 6m mom {row['momentum']:.0%}, 20d {row['short']:.0%}"
+            "thesis": f"rank {int(row['rank'])}, {mom_m}m mom {row['momentum']:.0%}, 20d {row['short']:.0%}"
                       + (" | half size: implied vol >> realized" if mult < 1.0 else "")
                       + (" | insider buying tilt" if sym in tilt else "")
                       + (" | dilutive filing flagged" if (facts.get(sym) or {}).get("offering_filings") else "")

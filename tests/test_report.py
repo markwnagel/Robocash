@@ -118,7 +118,7 @@ def test_fallback_summary_explains_every_exit_reason_in_plain_words():
 
 def test_fallback_summary_reads_the_rank_and_size_decision_off_a_buy():
     s = fallback_summary("bought", {"thesis": "rank 4, 6m mom 214%, 20d 21% | analyst REDUCE: blah"})
-    assert "ranked 4 out of the ~800" in s and "214% over six months" in s and "21% in the past month" in s
+    assert "ranked 4 out of the ~800" in s and "214% over 6 months" in s and "21% in the past month" in s
     assert "smaller stake" in s                       # REDUCE has to reach the reader, not just the log
     assert "smaller stake" not in fallback_summary("bought", {"thesis": "rank 4, 6m mom 214%, 20d 21%"})
     assert fallback_summary("bought", {"thesis": ""})  # a thesis-less adopted position still says something

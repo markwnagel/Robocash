@@ -17,6 +17,24 @@ PANEL_KEYS = ("momentum_lookback_days", "momentum_skip_days", "short_lookback_da
               "atr_days", "vol_days")
 
 
+def momentum_months(scfg: dict) -> int:
+    """The momentum lookback in months (21 trading days each), for labels: 12 for v2.1's 252 days. Theses said
+    "6m mom" after v2.1 moved to 252 days, which read as a live/tested mismatch (audit 2026-11-21)."""
+    return max(1, round(int(scfg["momentum_lookback_days"]) / 21))
+
+
+def history_bars_needed(scfg: dict) -> int:
+    """Daily bars a name needs before every signal is defined: the momentum shift and the trend MA."""
+    return max(int(scfg["momentum_lookback_days"]), int(scfg["trend_ma_days"])) + 1
+
+
+def history_bars_requested(history_days: int) -> int:
+    """Trading bars fetch_daily_bars asks for with data.history_days: it requests history_days x 1.45 + 10
+    calendar days, about 5 trading days in 7, less ~9 holidays a year."""
+    cal = int(history_days * 1.45) + 10
+    return int(cal * 5 / 7 - cal / 365 * 9)
+
+
 def panel_key(scfg: dict) -> tuple:
     return tuple(scfg[k] for k in PANEL_KEYS)
 

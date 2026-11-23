@@ -151,7 +151,14 @@ def checkout() -> dict:
                                             text=True, timeout=5).stdout.strip()
             branch = git("rev-parse", "--abbrev-ref", "HEAD")
             behind = git("rev-list", "--count", "HEAD..origin/main")
-            _CODE["checkout"] = {"branch": branch or None, "behind_main": int(behind) if behind.isdigit() else None} if branch else {}
+            co = {"branch": branch or None, "behind_main": int(behind) if behind.isdigit() else None} if branch else {}
+            if co.get("behind_main"):
+                # What the run lacks, so a stale run says which merges were missing and what they touch: on
+                # 2026-11-17 the monitor could not tell what 2 missing commits changed (monitor R-73).
+                co["missing_commits"] = git("log", "--format=%h %s", "--no-merges", "-n", "10",
+                                            "HEAD..origin/main").splitlines()
+                co["missing_paths"] = git("diff", "--name-only", "HEAD...origin/main").splitlines()[:30]
+            _CODE["checkout"] = co
         except Exception:
             _CODE["checkout"] = {}
     return _CODE["checkout"]
