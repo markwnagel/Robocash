@@ -59,6 +59,8 @@ def test_owner_resolutions_mark_carried_findings():
     assert out[0]["resolved"] == "fixed 2026-11-14"
     assert "resolved" not in out[1]          # resolved before the review that still carries it: the review knew
     assert "resolved" not in out[2] and "resolved" not in items[0]
+    same_day = mark_resolved([{"id": "F-60"}], res, "2026-11-14T14:00:05-08:00")
+    assert same_day[0]["resolved"] == "fixed 2026-11-14"     # fixed after the same day's review
 
 
 def test_email_shows_owner_resolution():

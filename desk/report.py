@@ -55,11 +55,13 @@ def owner_resolutions(lines: list) -> dict:
 def mark_resolved(items: list, resolutions: dict, reviewed_on: str | None) -> list:
     """Carried findings and recommendations with the owner's resolution since the model review attached as
     'resolved' ("fixed 2026-11-14"). On rules-only days the email listed F-60..F-65 as open for four days after
-    PR #59 fixed them and config.yaml said so (monitor review 2026-11-16); the next model review closes them."""
+    PR #59 fixed them and config.yaml said so (monitor review 2026-11-16); the next model review closes them. A
+    resolution dated the review's own day counts: a review that saw it would have closed the finding, so one it
+    still carries was fixed after it (F-67..F-71, reviewed and fixed on 2026-11-23)."""
     out = []
     for it in items or []:
         r = resolutions.get(it.get("id"))
-        if r and (not reviewed_on or r[1] > reviewed_on):
+        if r and (not reviewed_on or r[1] >= reviewed_on[:10]):
             it = {**it, "resolved": f"{r[0]} {r[1]}"}
         out.append(it)
     return out
