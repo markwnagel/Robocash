@@ -3,12 +3,29 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.request
 
 log = logging.getLogger("desk.notify")
 
 
-def send_email(subject: str, body: str, cfg: dict, html: str | None = None) -> str:
+SMTP_RETRY_WAITS = (30, 120)   # seconds before each retry of a send the connection dropped
+
+
+def smtp_transient(e: Exception) -> bool:
+    """A dropped or timed-out connection that a later try can fix - not a rejected login or address. 2026-11-20:
+    "Connection unexpectedly closed: The read operation timed out" lost the day's email until a manual resend
+    8 hours later (monitor F-67)."""
+    import smtplib
+    import socket
+    if isinstance(e, (smtplib.SMTPAuthenticationError, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused)):
+        return False
+    return isinstance(e, (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, socket.timeout, TimeoutError,
+                          ConnectionError))
+
+
+def send_email(subject: str, body: str, cfg: dict, html: str | None = None, waits=SMTP_RETRY_WAITS,
+               sleep=time.sleep) -> str:
     """SMTP if configured, else Resend, else nothing. Returns a one-line status for the log.
     Credentials come from the environment only - nothing about mail is stored in the repo."""
     to = os.environ.get("REPORT_TO", "") or cfg.get("report", {}).get("to", "")
@@ -26,20 +43,25 @@ def send_email(subject: str, body: str, cfg: dict, html: str | None = None) -> s
             # multipart/alternative: clients that block HTML still show the plain-text report.
             m.add_alternative(html, subtype="html")
         port = int(os.environ.get("SMTP_PORT", "587"))
-        try:
-            if port == 465:
-                with smtplib.SMTP_SSL(host, port, timeout=30) as s:
-                    s.login(user, pw)
-                    s.send_message(m)
-            else:
-                with smtplib.SMTP(host, port, timeout=30) as s:
-                    s.starttls()
-                    s.login(user, pw)
-                    s.send_message(m)
-            return f"emailed {to} via {host}"
-        except Exception as e:
-            log.warning("SMTP send failed: %s", e)
-            return f"SMTP FAILED ({type(e).__name__}): {e}"
+        for attempt in range(len(waits) + 1):
+            try:
+                if port == 465:
+                    with smtplib.SMTP_SSL(host, port, timeout=30) as s:
+                        s.login(user, pw)
+                        s.send_message(m)
+                else:
+                    with smtplib.SMTP(host, port, timeout=30) as s:
+                        s.starttls()
+                        s.login(user, pw)
+                        s.send_message(m)
+                return f"emailed {to} via {host}" + (f" (attempt {attempt + 1})" if attempt else "")
+            except Exception as e:
+                if smtp_transient(e) and attempt < len(waits):
+                    log.warning("SMTP send failed (%s) - retrying in %ss", e, waits[attempt])
+                    sleep(waits[attempt])
+                    continue
+                log.warning("SMTP send failed: %s", e)
+                return f"SMTP FAILED ({type(e).__name__}): {e}" + (f" after {attempt + 1} attempts" if attempt else "")
     key = os.environ.get("RESEND_API_KEY", "")
     if key:
         payload = json.dumps({"from": sender, "to": [to], "subject": subject, "text": body,

@@ -135,7 +135,8 @@ def role_signals(events: list) -> dict:
             "calls_detail": [{k: x.get(k) for k in ("ts", "started_at", "run_id", "served_by", "price_per_mtok",
                                                     "input_tokens", "output_tokens", "web_searches",
                                                     "web_fetches", "server_blocks", "server_result_chars",
-                                                    "prompt_symbols", "input_chars", "prompt_fact_chars", "latency_s")}
+                                                    "prompt_symbols", "input_chars", "prompt_fact_chars",
+                                                    "prompt_fact_fields", "latency_s")}
                              for x in c[-10:]],
             "max_turns": max((x.get("turns") or 0 for x in c), default=0),
             "outputs": len(o), "no_answer": sum(1 for x in o if x.get("returned") is None),
@@ -328,8 +329,10 @@ def stale_checkout_alarms(events: list | None) -> list:
         out.append({"key": f"desk-stale-code-{day}", "severity": "SEV2" if on_main else "SEV1",
                     "title": f"Desk traded from {where}",
                     "detail": f"run {e.get('run_id')} at {e['ts']} ran code {e.get('code')} from {where}. Merged changes "
-                              f"were not in the code that traded, and the parity replay assumes they were. Fix: "
-                              f"git checkout main && git pull --ff-only before the next 13:40 run."})
+                              f"were not in the code that traded, and the parity replay assumes they were."
+                              + (f" Missing: {'; '.join(e['missing_commits'])}." if e.get("missing_commits") else "")
+                              + (f" Touching: {', '.join(e['missing_paths'])}." if e.get("missing_paths") else "")
+                              + " Fix: git checkout main && git pull --ff-only before the next 13:40 run."})
     return out
 
 
@@ -482,7 +485,8 @@ def parked(f: dict) -> bool:
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-def model_review_due(mcfg: dict, now: datetime, alarms: list, last_review: str | None, forced: bool = False) -> tuple:
+def model_review_due(mcfg: dict, now: datetime, alarms: list, last_review: str | None, forced: bool = False,
+                     failed_on: str | None = None) -> tuple:
     """(due, why). The model review was 37% of API spend ($0.63 a day) and 91% of its findings were SEV3/4; the
     hard alarms that matter are code and run every day regardless (engineering review 2026-10-17). With
     monitor.model_review_weekdays set it runs on those days, on any day a hard alarm fires, and at least weekly."""
@@ -493,6 +497,8 @@ def model_review_due(mcfg: dict, now: datetime, alarms: list, last_review: str |
         return True, "daily"
     if alarms:
         return True, "a hard alarm was raised"
+    if failed_on:
+        return True, f"the model review due on {failed_on} did not complete"
     if now.weekday() in days:
         return True, "weekly review day"
     if not last_review or (now - datetime.fromisoformat(last_review)).days >= 7:

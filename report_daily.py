@@ -322,8 +322,10 @@ def main() -> None:
                if last_equity else f"TeamRobo daily {today.isoformat()}")
     status = deliver(today, subject, text, html, cfg, {fp_path: json.dumps(new_fp, indent=1, sort_keys=True, default=str),
                                                         seen_path: json.dumps({"runs": research[1]})})
-    telemetry.note(email="sent" if status.startswith("emailed") else "failed" if "FAILED" in status else "skipped",
-                   email_detail=status)
+    failed = "FAILED" in status
+    # A run whose email never went out is not "ok": it was recorded that way on 2026-11-20 (monitor F-67).
+    telemetry.note(email="sent" if status.startswith("emailed") else "failed" if failed else "skipped",
+                   email_detail=status, **({"status": "degraded"} if failed else {}))
     print(text)
     send(f"[daily report] {status}", cfg)
 

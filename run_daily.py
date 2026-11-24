@@ -40,7 +40,7 @@ from desk.portfolio import (decay_exit, entry_limit, pace_entries, pyramid_due, 
                             trail_stop)
 from desk.regime import current_regime, regime_params, vix_series
 from desk.risk import auto_resume_due, can_exit_today, clear_halt, enforce_entry_limits, evaluate, resume_date
-from desk.signals import compute_panels, rerank, snapshot
+from desk.signals import compute_panels, history_bars_needed, momentum_months, rerank, snapshot, unranked_reason
 from desk import schedule, shadow, telemetry
 from desk.state import account_change, load_state, save_state, write_brief
 
@@ -205,7 +205,7 @@ def main() -> None:
                    partial_bar=count("session still in progress") > 0, regime=plan.get("regime_label", "n/a"),
                    regime_state=plan.get("regime", "n/a"),
                    protect_only=protect_only, decision_failed=failure is not None,
-                   holding_ranks=plan.get("holding_ranks") or {})
+                   holding_ranks=plan.get("holding_ranks") or {}, holding_unranked=plan.get("holding_unranked") or {})
     if failure is not None:
         raise failure
 
@@ -285,6 +285,12 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     symbols = sorted(set(universe) | set(st["positions"]))
     panel = cached_bars(data, symbols, cfg["data"]["history_days"], cfg)
     scfg, pcfg, ecfg, rcfg = cfg["signals"], cfg["portfolio"], cfg["exits"], cfg["risk"]
+    mom_m = momentum_months(scfg)
+    need, got = history_bars_needed(scfg), len(panel["close"].index)
+    if got < need:
+        # Every name would rank on NaN momentum and drop out: say so rather than stage nothing silently.
+        notes.append(f"WARNING: the price panel has {got} daily bars and the signals need {need} - raise "
+                     f"data.history_days ({cfg['data']['history_days']})")
     panels = compute_panels(panel, scfg)
     snap = snapshot(panels, -1, scfg)
 
@@ -414,6 +420,18 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
     # choosing entries: they drop blocked and un-fact-checked names, which lifted every holding's rank - INTC at
     # 47 and UMC at 47 stayed "inside 40" live until they went ineligible (2026-10-05..14, parity review 10-23).
     rank_snap = snap
+    # A holding the full-universe ranking leaves out is sold as signal decay once it passes min_hold_days, so the
+    # brief says why it is unranked and when that applies (monitor F-70: DE unranked for days, no reason recorded).
+    unranked = {}
+    for sym, pos in st["positions"].items():
+        why = unranked_reason(rank_snap, sym, scfg) if pos.get("filled") else None
+        if why:
+            unranked[sym] = why
+            held = (today - date.fromisoformat(pos["entry_date"])).days if pos.get("entry_date") else 0
+            left = int(ecfg["min_hold_days"]) - held
+            notes.append(f"{sym} unranked ({why}): " + (f"exits on signal decay if still unranked from day "
+                                                        f"{int(ecfg['min_hold_days'])} ({left} days)" if left > 0
+                                                        else "eligible for the signal-decay exit"))
     snap = rerank(snap, tilt, blocked)
     notes += [f"blocked {s}: {r}" for s, r in list(blocked.items())[:8]]
     if facts:
@@ -487,9 +505,9 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
         cash_avail -= sz["notional"]
         entries.append({
             "symbol": sym, "price": float(row["close"]), "limit": entry_limit(float(row["close"])),
-            "rank": int(row["rank"]), "momentum_6m": float(row["momentum"]), "return_20d": float(row["short"]),
+            "rank": int(row["rank"]), f"momentum_{mom_m}m": float(row["momentum"]), "return_20d": float(row["short"]),
             "atr_pct": float(row["atr_pct"]), **sz,
-            "thesis": f"rank {int(row['rank'])}, 6m mom {row['momentum']:.0%}, 20d {row['short']:.0%}"
+            "thesis": f"rank {int(row['rank'])}, {mom_m}m mom {row['momentum']:.0%}, 20d {row['short']:.0%}"
                       + (" | half size: implied vol >> realized" if mult < 1.0 else "")
                       + (" | insider buying tilt" if sym in tilt else "")
                       + (" | dilutive filing flagged" if (facts.get(sym) or {}).get("offering_filings") else "")
@@ -616,6 +634,7 @@ def decide(args, cfg, today, st, acct, live, decision, broker, trading, data, ke
             "analyst_status": analyst_status, "stale": stale, "target_positions": target_positions,
             "regime": regime_status, "regime_label": regime_label, "shadow": shadow_rows, "funnel": funnel,
             # Each holding's full-universe rank (None: not ranked today), so a decay exit can be checked later.
+            "holding_unranked": unranked,
             "holding_ranks": {sym: (int(rank_snap.loc[sym, "rank"]) if sym in rank_snap.index
                                     and bool(rank_snap.loc[sym, "eligible"]) else None)
                               for sym, pos in st["positions"].items() if pos.get("filled")}}

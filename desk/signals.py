@@ -17,6 +17,44 @@ PANEL_KEYS = ("momentum_lookback_days", "momentum_skip_days", "short_lookback_da
               "atr_days", "vol_days")
 
 
+def momentum_months(scfg: dict) -> int:
+    """The momentum lookback in months (21 trading days each), for labels: 12 for v2.1's 252 days. Theses said
+    "6m mom" after v2.1 moved to 252 days, which read as a live/tested mismatch (audit 2026-11-21)."""
+    return max(1, round(int(scfg["momentum_lookback_days"]) / 21))
+
+
+def history_bars_needed(scfg: dict) -> int:
+    """Daily bars a name needs before every signal is defined: the momentum shift and the trend MA."""
+    return max(int(scfg["momentum_lookback_days"]), int(scfg["trend_ma_days"])) + 1
+
+
+def history_bars_requested(history_days: int) -> int:
+    """Trading bars fetch_daily_bars asks for with data.history_days: it requests history_days x 1.45 + 10
+    calendar days, about 5 trading days in 7, less ~9 holidays a year."""
+    cal = int(history_days * 1.45) + 10
+    return int(cal * 5 / 7 - cal / 365 * 9)
+
+
+def unranked_reason(snap: pd.DataFrame, sym: str, scfg: dict) -> str | None:
+    """Why a name has no rank today, in the words of the eligibility rule it fails; None when it is ranked. The run
+    record showed DE unranked for two days with no reason (monitor F-70)."""
+    if sym not in snap.index:
+        return "no price data today"
+    r = snap.loc[sym]
+    if bool(r["eligible"]):
+        return None
+    why = []
+    if pd.isna(r["close"]) or pd.isna(r["ma"]) or pd.isna(r["momentum"]):
+        return "not enough price history"
+    if not r["close"] > r["ma"]:
+        why.append(f"close below its {int(scfg['trend_ma_days'])}-day average")
+    if not r["momentum"] > 0:
+        why.append(f"{momentum_months(scfg)}-month momentum not positive")
+    if not r["atr_pct"] <= scfg["max_atr_pct"]:
+        why.append(f"ATR {r['atr_pct']:.1%} of price, over the {scfg['max_atr_pct']:.0%} cap")
+    return "; ".join(why) or "blocked"
+
+
 def panel_key(scfg: dict) -> tuple:
     return tuple(scfg[k] for k in PANEL_KEYS)
 

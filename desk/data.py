@@ -20,6 +20,29 @@ from .state import atomic_pickle, atomic_write_text
 
 log = logging.getLogger("desk.data")
 CHUNK = 200
+NET_RETRY_WAITS = (10, 30, 90)   # seconds before each retry of a bar request the network dropped
+
+
+def transient(e: Exception) -> bool:
+    """A dropped or timed-out connection, which a later try can fix. 2026-11-20: one request timed out after 60s
+    at 13:41 and the whole decision phase failed - no exits or entries until a manual rerun at 18:25."""
+    import requests
+    import urllib3
+    return isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                          urllib3.exceptions.ProtocolError, urllib3.exceptions.TimeoutError, TimeoutError,
+                          ConnectionError))
+
+
+def with_retries(call, what: str, waits=NET_RETRY_WAITS, sleep=time.sleep):
+    """call(), tried again after each wait in `waits` when the network drops it. Anything else raises at once."""
+    for i in range(len(waits) + 1):
+        try:
+            return call()
+        except Exception as e:
+            if not transient(e) or i == len(waits):
+                raise
+            log.warning("%s: %s - retrying in %ss (%d of %d)", what, type(e).__name__, waits[i], i + 1, len(waits))
+            sleep(waits[i])
 FIELDS = ["open", "high", "low", "close", "volume"]
 ET = ZoneInfo("America/New_York")
 SESSION_DONE = (16, 20)     # ET: the close plus the free feed's 15-minute delay and a margin
@@ -75,13 +98,14 @@ def fetch_daily_bars(data: StockHistoricalDataClient, symbols: list, days: int,
             chunk = list(syms[i:i + CHUNK])
             req = StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day,
                                    start=start, end=end, adjustment=Adjustment.SPLIT, feed=feed_state["feed"])
+            what = f"bars {i + 1}-{i + len(chunk)}"
             try:
-                bars = data.get_stock_bars(req)
+                bars = with_retries(lambda: data.get_stock_bars(req), what)
             except APIError as e:
                 if feed_state["feed"] != DataFeed.IEX and "subscription" in str(e).lower():
                     log.warning("SIP feed not permitted; falling back to IEX (volumes will be partial)")
                     feed_state["feed"] = req.feed = DataFeed.IEX
-                    bars = data.get_stock_bars(req)
+                    bars = with_retries(lambda: data.get_stock_bars(req), what)
                 else:
                     raise
             df = bars.df
