@@ -85,3 +85,72 @@ def test_old_and_new_theses_both_parse():
 
 def test_an_immaterial_sliver_is_not_a_data_concern():
     assert "even one so small you\njudge it immaterial" in ANALYST_SYSTEM
+
+
+def test_smtp_send_retries_a_dropped_connection(monkeypatch):
+    import smtplib
+    from desk import notify
+    monkeypatch.setenv("REPORT_TO", "owner@example.test")
+    for k, v in (("SMTP_HOST", "smtp.example.test"), ("SMTP_USER", "u"), ("SMTP_PASSWORD", "p"), ("SMTP_PORT", "587")):
+        monkeypatch.setenv(k, v)
+    tries = []
+
+    class FakeSMTP:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def starttls(self):
+            pass
+
+        def login(self, *a):
+            pass
+
+        def send_message(self, m):
+            tries.append(1)
+            if len(tries) < 2:
+                raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed: The read operation timed out")
+
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    waits = []
+    out = notify.send_email("s", "b", {}, waits=(5, 9), sleep=waits.append)
+    assert out.startswith("emailed owner@example.test") and "(attempt 2)" in out and waits == [5]
+
+    class BadLogin(FakeSMTP):
+        def login(self, *a):
+            raise smtplib.SMTPAuthenticationError(535, b"bad credentials")
+    monkeypatch.setattr(smtplib, "SMTP", BadLogin)
+    waits.clear()
+    assert "SMTP FAILED (SMTPAuthenticationError)" in notify.send_email("s", "b", {}, waits=(5, 9), sleep=waits.append)
+    assert waits == []                                          # a rejected login is not retried
+
+
+def test_a_failed_email_makes_the_report_run_degraded():
+    src = open("report_daily.py").read()
+    assert '**({"status": "degraded"} if failed else {})' in src
+
+
+def test_unranked_holdings_say_why():
+    import pandas as pd
+    from desk.signals import unranked_reason
+    scfg = {"trend_ma_days": 50, "momentum_lookback_days": 252, "max_atr_pct": 0.08}
+    snap = pd.DataFrame({"close": [100.0, 90.0, 50.0], "ma": [95.0, 95.0, None], "momentum": [0.2, -0.1, 0.3],
+                         "atr_pct": [0.02, 0.09, 0.02], "eligible": [True, False, False]}, index=["OK", "DE", "NEW"])
+    assert unranked_reason(snap, "OK", scfg) is None
+    assert unranked_reason(snap, "DE", scfg) == ("close below its 50-day average; 12-month momentum not positive; "
+                                                 "ATR 9.0% of price, over the 8% cap")
+    assert unranked_reason(snap, "NEW", scfg) == "not enough price history"
+    assert unranked_reason(snap, "GONE", scfg) == "no price data today"
+
+
+def test_classifier_and_fact_pack_telemetry():
+    from desk.analyst import prompt_composition
+    assert "missing=sorted(set(payload) - set(out))[:10]" in open("desk/facts.py").read()
+    comp = prompt_composition({"holdings": [{"symbol": "A", "facts": {"headlines": ["x" * 50], "shelf_filings": []}}],
+                               "candidates": []})
+    assert comp["prompt_fact_fields"]["headlines"] > comp["prompt_fact_fields"]["shelf_filings"]

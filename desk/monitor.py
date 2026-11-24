@@ -135,7 +135,8 @@ def role_signals(events: list) -> dict:
             "calls_detail": [{k: x.get(k) for k in ("ts", "started_at", "run_id", "served_by", "price_per_mtok",
                                                     "input_tokens", "output_tokens", "web_searches",
                                                     "web_fetches", "server_blocks", "server_result_chars",
-                                                    "prompt_symbols", "input_chars", "prompt_fact_chars", "latency_s")}
+                                                    "prompt_symbols", "input_chars", "prompt_fact_chars",
+                                                    "prompt_fact_fields", "latency_s")}
                              for x in c[-10:]],
             "max_turns": max((x.get("turns") or 0 for x in c), default=0),
             "outputs": len(o), "no_answer": sum(1 for x in o if x.get("returned") is None),

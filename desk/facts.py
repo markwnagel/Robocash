@@ -272,6 +272,8 @@ def classify_headlines(by_symbol: dict, model: str) -> dict:
         telemetry.llm_call("classifier", model, started, [resp], **comp)
         telemetry.agent_output("classifier", len(payload), len(set(out) & set(payload)),
                                unrequested=sorted(set(out) - set(payload))[:10],
+                               # which requested names came back with nothing (monitor F-71: 98.7%, unnamed)
+                               missing=sorted(set(payload) - set(out))[:10],
                                flagged=sum(1 for r in out.values() if r.get("offering") or r.get("guidance_cut")
                                            or r.get("acquisition_target") or r.get("legal_regulatory")))
         return out

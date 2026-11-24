@@ -256,8 +256,15 @@ def prompt_composition(payload: dict) -> dict:
     inside the call (each search added 20-35k tokens on 2026-09-28/29: monitor F-19, R-19)."""
     sections = {k: len(json.dumps(v, default=str)) for k, v in payload.items()}
     facts = [x.get("facts") for key in ("holdings", "candidates") for x in payload.get(key) or [] if isinstance(x, dict)]
+    fields: dict = {}
+    for f in facts:
+        for k, v in (f or {}).items():
+            fields[k] = fields.get(k, 0) + len(json.dumps(v, default=str))
+    # By field as well as in total, so a smaller fact pack can be traced to headlines, filings or insider rows
+    # (monitor F-69: -41% per symbol, from the shelf_filings cap and a quieter news week, inferred by hand).
+    top = dict(sorted(fields.items(), key=lambda kv: -kv[1])[:8])
     return {"prompt_chars": sections, "prompt_symbols": len(_symbols(payload)),
-            "prompt_fact_chars": sum(len(json.dumps(f, default=str)) for f in facts if f)}
+            "prompt_fact_chars": sum(len(json.dumps(f, default=str)) for f in facts if f), "prompt_fact_fields": top}
 
 
 # Web searches the last _call_json made, so a role's agent_output can set its citations against them.
